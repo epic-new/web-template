@@ -1,4 +1,0 @@
-interface:
-  display_name: "Models"
-  short_description: "Isolate Drizzle persistence behind static Models"
-  default_prompt: "Use $models to create or refactor a static table Model that owns Drizzle queries and returns schema-inferred plain records."

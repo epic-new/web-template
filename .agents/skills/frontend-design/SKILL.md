@@ -9,8 +9,9 @@ The user provides frontend requirements: a component, page, application, or inte
 
 ## Architecture First
 
-Before editing UI, read `docs/DESIGN.md`, the sources it names, and
-`.agents/skills/components/SKILL.md`. The components skill is authoritative for
+Before editing UI, read `docs/DESIGN.md`, the sources it names, and the
+components reference of the `execute` skill (`references/components.md`, from
+`@epicnew/skills` — see `.agents/AGENTS.md`). That reference is authoritative for
 file naming, Server Component prefetch/hydration, component reuse, hook-only
 behavior access, state ownership, and tests. Aesthetic direction never overrides
 those constraints.
