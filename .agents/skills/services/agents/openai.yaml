@@ -1,4 +1,0 @@
-interface:
-  display_name: "Services"
-  short_description: "Implement behavior-named business Services"
-  default_prompt: "Use $services to create or refactor a behavior-named Service with static execute, Policy authorization, and Model-backed persistence."

@@ -150,7 +150,7 @@ await PostDB(db, schema, { users: [{ name: 'Alice' }] });
 
 ## Epic CLI
 
-When the user is planning a project, creating/managing issues, or building/reviewing issues with the `epic` command, use the **epic** skill at `.agents/skills/epic/SKILL.md`. This includes requests like "create a project", "generate a PRD", "break a PRD into issues", "plan an issue", "build an issue", or "review/merge an issue".
+When the user is planning a project, creating/managing issues, or building/reviewing issues with the `epic` command, use the **epic** skill (`epic:epic` during a build; `epic skill install` puts it in `~/.claude/skills` for your own sessions). This includes requests like "create a project", "generate a PRD", "break a PRD into issues", "plan an issue", "build an issue", or "review/merge an issue".
 
 PRD and issue content lives in the Epic database. Do not look for, create, or
 maintain tracked `.epic/prds/*.md` or `.epic/issues/*.md` files, and do not use
@@ -163,17 +163,24 @@ front matter.
 
 ## Workflow Skills
 
-The repository ships skills that encode this architecture. Prefer them over ad-hoc implementation:
+The lifecycle skills that encode this architecture — `prd`, `interview`, `plan`,
+`execute`, `verify`, `fix`, `review`, `merge`, `design`, `prototype` and `epic` —
+are not files in this repository. They come from `@epicnew/skills`, at the
+release line `.epic/skills.lock.json` names, and the tool running a build
+delivers them for the length of each phase: the `epic` CLI loads them as a
+plugin (`epic:plan`, `epic:execute`, …), and a cloud build writes them into the
+sandbox. Nothing is installed into the repo, and `git status` stays clean.
 
-- **prd → break → build** is the project workflow: write a PRD, split it into issues, then `build` each issue (plan, then execute).
-- **execute** implements an issue by loading the layer skills in order: **models**, **integrations**, **services**, **actions**, **routes**, **hooks**, **components**, then **test**.
-- **plan** writes an implementation plan into the ephemeral issue buffer supplied
-  by the CLI; **issues** authors the canonical issue body that the CLI persists to
-  the database.
+- **prd → build** is the project workflow: write a PRD, break it into issues,
+  then build each issue (plan, then execute, then verify).
+- **execute** implements an issue layer by layer — models, integrations,
+  services, actions, routes, hooks, components, then tests — loading the one
+  reference each layer needs from its own `references/`.
+- The architecture and the specification format behind them live in the `epic`
+  skill's `references/architecture/web.md` and `references/specification/`.
 
-Each layer skill (`models`, `integrations`, `services`, `actions`, `hooks`,
-`routes`, `components`) carries its own architecture/spec reference, so load the
-matching skill when writing that layer.
+To use them in a session you start yourself, run `epic skill install`. To move
+the project to a new release line, run `epic skill upgrade` and commit the lock.
 
 ## Frontend Design
 
