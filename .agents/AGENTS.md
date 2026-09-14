@@ -112,7 +112,13 @@ bun run db:squash        # Combine migrations into one
 
 # Testing
 bun run test             # All automated tests (Vitest)
+bun run test path/to/x   # Only the tests whose path matches (several filters combine)
 ```
+
+Test output is short for coding agents on purpose: Vitest switches to its
+`agent` reporter by itself when it detects one — failures only — **unless a
+`--reporter` is passed**, so do not add one. `vitest.setup.ts` mutes
+drizzle-kit's per-file schema spinner for the same reason.
 
 ## Testing
 
