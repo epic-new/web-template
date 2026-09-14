@@ -150,7 +150,7 @@ await PostDB(db, schema, { users: [{ name: 'Alice' }] });
 
 ## Epic CLI
 
-When the user is planning a project, creating/managing issues, or building/reviewing issues with the `epic` command, use the **epic** skill (`epic:epic` during a build; `epic skill install` puts it in `~/.claude/skills` for your own sessions). This includes requests like "create a project", "generate a PRD", "break a PRD into issues", "plan an issue", "build an issue", or "review/merge an issue".
+When the user is planning a project, creating/managing issues, or building/reviewing issues with the `epic` command, use the **epic** skill (`epic:epic` during a build; in a session you start yourself, the `epic` skill the CLI keeps in `~/.claude/skills`). If neither is available, the `epic` CLI is not installed on this machine: install it with `bun install -g @epicnew/cli`, then run `epic login` — that also installs the skill. This includes requests like "create a project", "generate a PRD", "break a PRD into issues", "plan an issue", "build an issue", or "review/merge an issue".
 
 PRD and issue content lives in the Epic database. Do not look for, create, or
 maintain tracked `.epic/prds/*.md` or `.epic/issues/*.md` files, and do not use
@@ -179,8 +179,10 @@ sandbox. Nothing is installed into the repo, and `git status` stays clean.
 - The architecture and the specification format behind them live in the `epic`
   skill's `references/architecture/web.md` and `references/specification/`.
 
-To use them in a session you start yourself, run `epic skill install`. To move
-the project to a new release line, run `epic skill upgrade` and commit the lock.
+In a session you start yourself, the `epic` skill is the one that loads, and it
+carries the architecture and specification references above; the phase skills
+are handed to a build, not installed. To move the project to a new release
+line, run `epic skill upgrade` and commit the lock.
 
 ## Frontend Design
 
