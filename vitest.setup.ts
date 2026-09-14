@@ -29,12 +29,32 @@ const tableNames = Object.values(schema)
   .filter((t) => !!(t as unknown as Record<symbol, unknown>)?.[TABLE_SYMBOL])
   .map((t) => (t as unknown as Record<symbol, unknown>)[NAME_SYMBOL] as string);
 
-// Push schema before all tests
+// Push schema before all tests.
+//
+// drizzle-kit draws a "Pulling schema from database..." spinner straight onto
+// the terminal, and this runs once per test file — on a full run it was most of
+// the output a coding agent had to read. Muted while it runs; a failed push
+// still throws and fails the file.
 beforeAll(async () => {
   const { pushSQLiteSchema } = await import("drizzle-kit/api");
-  const { apply } = await pushSQLiteSchema(schema, db);
-  await apply();
+  await withoutTerminalOutput(async () => {
+    const { apply } = await pushSQLiteSchema(schema, db);
+    await apply();
+  });
 }, 20000);
+
+async function withoutTerminalOutput<T>(run: () => Promise<T>): Promise<T> {
+  const stdout = process.stdout.write;
+  const stderr = process.stderr.write;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    return await run();
+  } finally {
+    process.stdout.write = stdout;
+    process.stderr.write = stderr;
+  }
+}
 
 // Clean all tables before each test
 beforeEach(async () => {
