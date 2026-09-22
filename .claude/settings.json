@@ -4,11 +4,8 @@
     "allow": [
       "Read(**)",
       "Edit(**)",
-      "Write(**)",
       "Bash",
       "Grep(**)",
-      "Glob(**)",
-      "NotebookEdit(**)",
       "NotebookRead(**)",
       "WebFetch",
       "WebFetch(domain:*)",
