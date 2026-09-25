@@ -160,12 +160,10 @@ When the user is planning a project, creating/managing issues, or building/revie
 
 PRD and issue content lives in the Epic database. Do not look for, create, or
 maintain tracked `.epic/prds/*.md` or `.epic/issues/*.md` files, and do not use
-`pull`, `push`, or `sync` commands (they are not part of the current CLI). During
-an agent phase, the CLI fetches the content into the exact gitignored session
-buffer named in the prompt (normally `.epic/sessions/<ID>/issue.md` or
-`.epic/sessions/<ID>/prd.md`), then PATCHes changes back and discards the buffer.
-These buffers are pure Markdown, not documents with tracked YAML lifecycle
-front matter.
+`pull`, `push`, or `sync` commands (they are not part of the current CLI). Read
+an issue with `epic issue show <id> -b` and save it with
+`epic issue edit <id> --description-file -`; a PRD with `epic prd show <PRD-id> -b`
+and `epic prd edit <PRD-id> --content-file -`. Nothing is copied to disk.
 
 ## Workflow Skills
 
