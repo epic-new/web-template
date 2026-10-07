@@ -53,7 +53,10 @@ export const config = {
      * - /_next/image (image optimization files)
      * - /favicon.ico (favicon file)
      * - /public (public files)
+     * - a file: any path whose last segment has an extension. Next serves
+     *   `public/logo.png` at `/logo.png`, never under `/public`, so an image,
+     *   font or download in `public/` would otherwise need a session.
      */
-    "/((?!auth|api|_next/static|_next/image|favicon.ico|public).*)",
+    "/((?!auth|api|_next/static|_next/image|favicon.ico|public|.*\\.[\\w]+$).*)",
   ],
 };
