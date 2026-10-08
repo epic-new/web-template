@@ -9,18 +9,10 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
-  // Skip middleware for public paths. NOTE: "/" is the authenticated Home
-  // page now (the public landing page was removed), so it is intentionally
-  // NOT excluded here.
-  if (
-    pathname.startsWith("/auth") ||
-    pathname.startsWith("/api") ||
-    pathname.startsWith("/admin") ||
-    pathname.startsWith("/playground") ||
-    pathname.startsWith("/_next") ||
-    pathname.startsWith("/public") ||
-    pathname === "/favicon.ico"
-  ) {
+  // Pages that guard themselves. "/" is the authenticated Home page, so it is
+  // intentionally not here; static files never reach this function (see the
+  // matcher).
+  if (pathname.startsWith("/admin") || pathname.startsWith("/playground")) {
     return NextResponse.next();
   }
 
@@ -46,17 +38,13 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     /*
-     * Match all request paths (including the root Home page "/") except for:
-     * - /auth (authentication pages)
-     * - /api (API routes)
-     * - /_next/static (static files)
-     * - /_next/image (image optimization files)
-     * - /favicon.ico (favicon file)
-     * - /public (public files)
+     * Every path except:
+     * - /auth and /api, which are public or authenticate themselves
+     * - /_next, Next's own assets
      * - a file: any path whose last segment has an extension. Next serves
      *   `public/logo.png` at `/logo.png`, never under `/public`, so an image,
      *   font or download in `public/` would otherwise need a session.
      */
-    "/((?!auth|api|_next/static|_next/image|favicon.ico|public|.*\\.[\\w]+$).*)",
+    "/((?!auth|api|_next/|.*\\.[\\w]+$).*)",
   ],
 };
