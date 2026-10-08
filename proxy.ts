@@ -12,7 +12,7 @@ export async function proxy(request: NextRequest) {
   // Pages that guard themselves. "/" is the authenticated Home page, so it is
   // intentionally not here; static files never reach this function (see the
   // matcher).
-  if (pathname.startsWith("/admin") || pathname.startsWith("/playground")) {
+  if (pathname.startsWith("/admin")) {
     return NextResponse.next();
   }
 
@@ -41,10 +41,11 @@ export const config = {
      * Every path except:
      * - /auth and /api, which are public or authenticate themselves
      * - /_next, Next's own assets
-     * - a file: any path whose last segment has an extension. Next serves
-     *   `public/logo.png` at `/logo.png`, never under `/public`, so an image,
-     *   font or download in `public/` would otherwise need a session.
+     * - a static file, by its extension. Next serves `public/logo.png` at
+     *   `/logo.png`, never under `/public`, so an image, font or download in
+     *   `public/` would otherwise need a session. Named extensions only: a page
+     *   whose path has a dot in it (`/users/ana.silva`) still needs a session.
      */
-    "/((?!auth|api|_next/|.*\\.[\\w]+$).*)",
+    "/((?!auth|api|_next/|.*\\.(?:ico|png|jpe?g|gif|svg|webp|avif|bmp|css|js|map|txt|xml|json|webmanifest|woff2?|ttf|otf|eot|pdf|csv|zip|mp4|webm|mov|mp3|wav|ogg)$).*)",
   ],
 };
