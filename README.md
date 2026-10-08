@@ -115,5 +115,5 @@ test('creates user', async () => {
 ## Documentation
 
 - `.claude/CLAUDE.md` - Architecture and development guide
-- `docs/references/architecture.md` - Four-layer architecture details
+- The `epic` skill's `references/architecture/web.md` - Four-layer architecture details
 - `lib/db-test/README.md` - Database testing library
