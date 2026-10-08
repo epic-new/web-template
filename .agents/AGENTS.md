@@ -37,7 +37,7 @@ remain organized as vertical slices under `app/[page]/behaviors/[name]/`.
 
 **Server state** (lists, records, caching) is owned by **TanStack Query** (`useQuery`/`useMutation`); **Jotai is for UI state only** (dialogs, selections, filter/sort/page inputs). The initial page read and page-wide query-key factory live in `app/[page]/[page-name].query.ts`; additional or on-demand reads may use `[name].query.ts` beside their behavior. Pages prefetch the initial query and hydrate it with `HydrationBoundary`; mutations are optimistic by default. For authenticated user-owned data, every page-wide query key MUST include the actor/user identity so cached data cannot cross identities; this partitions cache data and never replaces server-side authorization.
 
-See `docs/references/architecture.md` for detailed patterns and code examples.
+The `epic` skill's `references/architecture/web.md` has the detailed patterns and code examples.
 
 ## Project Structure
 
@@ -169,11 +169,12 @@ and `epic prd edit <PRD-id> --content-file -`. Nothing is copied to disk.
 
 The lifecycle skills that encode this architecture — `prd`, `interview`, `plan`,
 `execute`, `verify`, `fix`, `review`, `merge`, `design`, `prototype` and `epic` —
-are not files in this repository. They come from `@epicnew/skills`, at the
-release line `.epic/skills.lock.json` names, and the tool running a build
-delivers them for the length of each phase: the `epic` CLI loads them as a
-plugin (`epic:plan`, `epic:execute`, …), and a cloud build writes them into the
+are not files in this repository. Each build gets them from Epic: the release
+Epic pins, for this project's type, so a new release reaches the next build
+without anyone updating anything. The `epic` CLI loads them as a plugin
+(`epic:plan`, `epic:execute`, …), and a cloud build writes them into the
 sandbox. Nothing is installed into the repo, and `git status` stays clean.
+`.epic/skills.lock.json` is only read when Epic cannot be reached.
 
 - **prd → build** is the project workflow: write a PRD, break it into issues,
   then build each issue (plan, then execute, then verify).
@@ -185,8 +186,7 @@ sandbox. Nothing is installed into the repo, and `git status` stays clean.
 
 In a session you start yourself, the `epic` skill is the one that loads, and it
 carries the architecture and specification references above; the phase skills
-are handed to a build, not installed. To move the project to a new release
-line, run `epic skill upgrade` and commit the lock.
+are handed to a build, not installed.
 
 ## Frontend Design
 
