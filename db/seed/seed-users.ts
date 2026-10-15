@@ -20,7 +20,24 @@ function generateUsers(): UserSeed[] {
     password: randomPassword(),
     name: `User ${i + 1}`,
     userId: "",
+    role: i === 0 ? "admin" : "user",
   }));
+}
+
+/** One admin among the seeded users: the first, unless the file already names one. */
+function withRoles(seeds: UserSeed[]): UserSeed[] {
+  const hasAdmin = seeds.some((seed) => seed.role === "admin");
+  return seeds.map((seed, i) => ({
+    ...seed,
+    role: seed.role ?? (!hasAdmin && i === 0 ? "admin" : "user"),
+  }));
+}
+
+async function applyRole(seed: UserSeed): Promise<UserSeed> {
+  if (seed.userId && seed.role) {
+    await db.update(user).set({ role: seed.role }).where(eq(user.id, seed.userId));
+  }
+  return seed;
 }
 
 /**
@@ -74,11 +91,11 @@ async function ensureUser(seed: UserSeed): Promise<UserSeed> {
  */
 export async function seedUsers(): Promise<UserSeed[]> {
   const existing = loadUserSeeds();
-  const targets = existing.length === 0 ? generateUsers() : existing;
+  const targets = withRoles(existing.length === 0 ? generateUsers() : existing);
 
   const reconciled: UserSeed[] = [];
   for (const target of targets) {
-    reconciled.push(await ensureUser(target));
+    reconciled.push(await applyRole(await ensureUser(target)));
   }
 
   saveUserSeeds(reconciled);

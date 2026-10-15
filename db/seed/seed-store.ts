@@ -20,6 +20,12 @@ export type UserSeed = {
   password: string;
   name: string;
   userId: string;
+  /**
+   * The user's role in the admin plugin. The first seeded user is the admin,
+   * so a signed-in check (verify, a page preview) can reach admin-only pages;
+   * a seed file written before roles has none, and the next seed gives them.
+   */
+  role?: "admin" | "user";
 };
 
 // process.cwd()-based, NOT import.meta.dir: `import.meta.dir` is a Bun-only
