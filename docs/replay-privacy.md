@@ -1,0 +1,114 @@
+# Replay privacy
+
+How Epic Replay decides whether to record, and what it hides when it does.
+Everything here runs in the browser before an event enters a buffer. The
+modules live in `lib/replay/`; the development harness at `/styleguide/replay`
+exercises them against synthetic content.
+
+Adding this code records nothing. No capture session runs outside the harness
+until the root provider mounts one, and even then nothing is recorded until the
+host application grants consent.
+
+## Consent
+
+```ts
+import { epicReplayConsent } from "@/lib/replay/replay-consent";
+
+epicReplayConsent.grant();    // the person agreed under the host's disclosure
+epicReplayConsent.withdraw(); // stops capture now
+```
+
+- The state starts `"unknown"`, which records nothing. Consent is never
+  inferred from the policy, the environment or a provider being mounted.
+- The template keeps consent in memory only. The host's consent and disclosure
+  policy decides what to remember, and calls `grant()` again on load.
+- `withdraw()` stops the recorder before it returns and clears the local
+  buffer and any pending start, whichever gate is then reported as the reason
+  (an expired or disabled policy does not keep earlier events). It does not delete recordings already uploaded; deletion is a
+  separate Epic responsibility, and no UI may claim otherwise.
+- `app/styleguide/replay/behaviors/manage-replay-consent/` shows how a consent
+  UI wires to it.
+
+## Gates
+
+`evaluateCapturePermission` (`lib/replay/replay-permission.ts`) runs every gate
+in this order. The first failure is the reason capture is blocked:
+
+| Reason | When |
+|---|---|
+| `policy_disabled` | The policy is not active, capture is off, or its environment is unresolved |
+| `policy_expired` | The policy's lifetime ran out (checked synchronously on every event) |
+| `consent_absent` | The host has not called `grant()` |
+| `consent_withdrawn` | The host called `withdraw()` |
+| `route_excluded` | The current route is not eligible |
+| `not_sampled` | This session was not selected by the sample rate |
+
+The capture session (`lib/replay/replay-capture.ts`) re-checks every gate before
+each event is admitted, stops synchronously on any URL change into an excluded
+route, and starts each new recording boundary with a fresh Meta and
+FullSnapshot. It never starts on a page loaded directly at an excluded route.
+
+## Privacy markers
+
+| Marker | Effect |
+|---|---|
+| `data-private` | The element and everything inside it are not recorded; replay shows an empty box of the same size. |
+| `data-mask` | Text inside is recorded as `*` of the same length. |
+| inputs | Every input, textarea and select value is masked while the policy's `maskAllInputs` is on (the default). Passwords and hidden inputs are always masked, including a `value` changed later through `setAttribute`; a value whose element is not known to the current recording is masked too. |
+
+The policy's `blockSelector` and `maskTextSelector` add to these defaults; they
+cannot remove them. Canvas, inline images and fonts are never recorded.
+
+## Routes
+
+Policy route patterns are exact (`/settings`), prefix wildcards (`/admin/*`,
+which also matches `/admin`) or single-segment params (`/users/:id`). Exclude
+wins over include; an empty include means every route. `/api/*` and `/_next/*`
+are always excluded. Paths are matched after decoding and with any trailing
+slash, query and hash removed.
+
+## Sampling
+
+Session sampling decides once whether a recording happens at all. The decision
+is kept in `sessionStorage` (or memory, when storage is unavailable) for the
+policy's `configVersion` and `sessionSampleRate`, so renders, events and
+refreshes never resample. It is unrelated to rrweb's event-detail sampling,
+which only throttles mousemove, scroll, media and input events inside a
+recording that is already sampled in.
+
+## Redaction
+
+`lib/replay/replay-redaction.ts` and `lib/replay/replay-event-sanitizer.ts`:
+
+- **URLs**, wherever they appear (the page `href`, `href`/`src`/`action`/
+  `srcset`/`formaction`/`poster` attributes, text, payloads, errors,
+  diagnostics): the values of credential query parameters become
+  `[redacted]`, as do those in a fragment that carries `=`, and `user:pass@`
+  is removed. The parameters are `_proxy_token` (the Epic preview gate token),
+  `token`, `access_token`, `id_token`, `refresh_token`, `code`, `state`,
+  `auth`, `authorization`, `api_key`, `apikey`, `key`, `secret`,
+  `client_secret`, `signature`, `sig`, `x-amz-signature`, `password`,
+  `session`, `jwt`, and any name containing `token`, `secret` or `password`.
+- **CSS**, wherever it is recorded (`style` attributes and their structured
+  diffs, a stylesheet's `_cssText`, `insertRule`/`replace`/`replaceSync`,
+  `setProperty`, adopted stylesheets): credential values inside `url(...)`,
+  `@import` and any `?name=value` pair are redacted with the same list, and
+  the rules keep their structure. A CSS or URL field of an unexpected shape is
+  dropped rather than recorded. Embedded frame sources (`rr_src`) are
+  sanitized as URLs.
+- **Payloads** of custom and plugin events: keys that look like credentials are
+  redacted, strings are capped at 1,024 characters, depth at 6, arrays and
+  objects at 50 entries, and a payload whose JSON is larger than 16,384 UTF-8
+  bytes becomes `{ truncated: true }`.
+- **Buffer**: the in-memory buffer is bounded by the policy's
+  `maxBatchEvents x 10` events and `maxBufferBytes`, measured as the UTF-8
+  bytes of the retained events serialized as one JSON array. Over the bound it
+  drops whole recording boundaries, oldest first; a boundary that alone is too
+  large is dropped entirely, so a consumer never holds incremental events
+  without their FullSnapshot.
+- **Errors**: name, message and stack are bounded and have their URLs
+  sanitized.
+- **Diagnostics**: a network entry keeps only method, sanitized URL, status and
+  duration. Request and response headers and bodies are never included, and
+  the replay configuration, ingestion and report endpoints (`/api/epic/replay/*`)
+  are never diagnosed.
