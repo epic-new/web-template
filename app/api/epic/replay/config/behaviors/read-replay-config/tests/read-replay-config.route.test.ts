@@ -89,12 +89,31 @@ describe("GET /api/epic/replay/config", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(await response.json()).toMatchObject({
+    const body = await response.json();
+    expect(body).toMatchObject({
+      contractVersion: 1,
       status: "disabled",
       reason: "not_configured",
+      environment: "test",
       capture: { enabled: false },
       reporting: { enabled: false },
     });
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        "contractVersion",
+        "status",
+        "reason",
+        "configVersion",
+        "environment",
+        "release",
+        "fetchedAt",
+        "expiresAt",
+        "refreshIntervalMs",
+        "capture",
+        "reporting",
+        "recording",
+      ].sort(),
+    );
     expect(upstream).not.toHaveBeenCalled();
   });
 });

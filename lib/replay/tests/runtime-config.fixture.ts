@@ -52,7 +52,7 @@ export function stubEpicEnv(token = PRODUCTION_TOKEN, environment = "production"
   vi.stubEnv("EPIC_API_URL", EPIC_API_URL);
   vi.stubEnv("EPIC_PROJECT_ID", "proj-1");
   vi.stubEnv("EPIC_PUBLISHING_TOKEN", token);
-  vi.stubEnv("EPIC_ENVIRONMENT", "");
+  vi.stubEnv("EPIC_ENVIRONMENT", undefined);
   vi.stubEnv("VERCEL_ENV", environment);
 }
 
@@ -66,7 +66,7 @@ export function clearEpicEnv() {
     "VERCEL_ENV",
     "VERCEL_GIT_COMMIT_SHA",
   ]) {
-    vi.stubEnv(name, "");
+    vi.stubEnv(name, undefined);
   }
 }
 

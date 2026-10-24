@@ -66,8 +66,13 @@ export const publicReplayConfigSchema = z
     contractVersion: z.literal(REPLAY_CONFIG_CONTRACT_VERSION),
     status: z.enum(["active", "disabled"]),
     reason: replayDisabledReasonSchema.nullable(),
-    configVersion: z.string().nullable(),
-    environment: replayEnvironmentSchema,
+    configVersion: z
+      .string()
+      .refine((version) => version.trim() !== "", "Blank configuration version")
+      .nullable(),
+    // Null only in a disabled response whose environment could not be
+    // resolved; central resources always carry one of the four values.
+    environment: replayEnvironmentSchema.nullable(),
     release: z.string().nullable(),
     fetchedAt: timestampSchema,
     expiresAt: timestampSchema,
@@ -105,7 +110,31 @@ export const publicReplayConfigSchema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((config, ctx) => {
+    const enabled = config.capture.enabled || config.reporting.enabled;
+    if (enabled && config.configVersion === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["configVersion"],
+        message: "Enabled capture or reporting requires a configuration version",
+      });
+    }
+    if (config.status === "active" && (config.reason !== null || config.environment === null)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: "An active policy has no reason and a resolved environment",
+      });
+    }
+    if (config.status === "disabled" && (enabled || config.reason === null)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: "A disabled policy has a reason and nothing enabled",
+      });
+    }
+  });
 
 export type PublicReplayConfig = z.infer<typeof publicReplayConfigSchema>;
 
@@ -116,7 +145,7 @@ export function disabledReplayConfig({
   now,
 }: {
   reason: ReplayDisabledReason;
-  environment: ReplayEnvironment;
+  environment: ReplayEnvironment | null;
   release: string | null;
   now: number;
 }): PublicReplayConfig {

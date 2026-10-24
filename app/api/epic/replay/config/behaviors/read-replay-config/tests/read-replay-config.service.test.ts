@@ -160,4 +160,131 @@ describe("ReadReplayConfig", () => {
     vi.stubEnv("EPIC_ENVIRONMENT", "preview");
     expect(await ReadReplayConfig.execute()).toMatchObject({ reason: "invalid_policy" });
   });
+
+  it("never falls back to production from an invalid explicit environment", async () => {
+    stubEpicEnv(PRODUCTION_TOKEN, "production");
+    vi.stubEnv("NODE_ENV", "production");
+
+    for (const explicit of ["preveiw", "", "   "]) {
+      vi.stubEnv("EPIC_ENVIRONMENT", explicit);
+      expect(await ReadReplayConfig.execute()).toMatchObject({
+        status: "disabled",
+        reason: "invalid_policy",
+        environment: null,
+        capture: { enabled: false },
+        reporting: { enabled: false },
+      });
+    }
+    expect(upstream).not.toHaveBeenCalled();
+
+    vi.stubEnv("EPIC_ENVIRONMENT", undefined);
+    expect(await ReadReplayConfig.execute()).toMatchObject({
+      status: "active",
+      environment: "production",
+    });
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires a real configuration version for an enabled policy", async () => {
+    stubEpicEnv();
+    const capture = runtimeConfigFixture().capture;
+    const flags = [
+      { capture: { ...capture, enabled: true }, reporting: { enabled: false } },
+      { capture: { ...capture, enabled: false }, reporting: { enabled: true } },
+      { capture: { ...capture, enabled: true }, reporting: { enabled: true } },
+    ];
+
+    for (const flag of flags) {
+      for (const configVersion of [null, "", "   "]) {
+        upstream.mockResolvedValueOnce(
+          jsonResponse(runtimeConfigFixture({ ...flag, configVersion })),
+        );
+        expect(await ReadReplayConfig.execute()).toMatchObject({
+          status: "disabled",
+          reason: "invalid_policy",
+          capture: { enabled: false },
+          reporting: { enabled: false },
+        });
+      }
+    }
+
+    upstream.mockResolvedValueOnce(
+      jsonResponse(
+        runtimeConfigFixture({
+          configVersion: null,
+          capture: { ...capture, enabled: false },
+          reporting: { enabled: false },
+        }),
+      ),
+    );
+    expect(await ReadReplayConfig.execute()).toMatchObject({
+      configVersion: null,
+      capture: { enabled: false },
+      reporting: { enabled: false },
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("test-publishing-token");
+  });
+
+  it("returns transport limits and rejects every credential-bearing addition", async () => {
+    stubEpicEnv();
+    const valid = await ReadReplayConfig.execute();
+    expect(valid.recording).toEqual({
+      transport: "epic-http",
+      limits: {
+        maxBatchBytes: 1_048_576,
+        maxBatchEvents: 500,
+        maxBufferBytes: 5_242_880,
+        maxBufferAgeMs: 30_000,
+        flushIntervalMs: 5_000,
+        maxAttempts: 3,
+      },
+    });
+
+    const base = runtimeConfigFixture();
+    const injected = [
+      { publicKey: "rrweb-public-key" },
+      { recordingCredential: "rrweb-private-key" },
+      { capture: { ...base.capture, publishingToken: "test-publishing-token" } },
+      { recording: { ...base.recording, internalNotes: "rrweb-private-key" } },
+      {
+        recording: {
+          ...base.recording,
+          limits: { ...base.recording.limits, publicKey: "rrweb-public-key" },
+        },
+      },
+    ];
+    const outputs = [JSON.stringify(valid)];
+    for (const overrides of injected) {
+      upstream.mockResolvedValueOnce(jsonResponse(runtimeConfigFixture(overrides)));
+      const result = await ReadReplayConfig.execute();
+      expect(result).toMatchObject({ status: "disabled", reason: "invalid_policy" });
+      outputs.push(JSON.stringify(result));
+    }
+
+    upstream.mockResolvedValueOnce(
+      jsonResponse(
+        runtimeConfigFixture({
+          recording: {
+            ...base.recording,
+            limits: { ...base.recording.limits, maxBatchBytes: 10_000_000 },
+          },
+        }),
+      ),
+    );
+    expect(await ReadReplayConfig.execute()).toMatchObject({ reason: "invalid_policy" });
+
+    const rendered = outputs.join(" ") + JSON.stringify(warn.mock.calls);
+    for (const sentinel of [
+      "rrweb-public-key",
+      "rrweb-private-key",
+      "test-publishing-token",
+      "projectId",
+      "applicationId",
+      "proj-1",
+      "app-1",
+      "epic.test",
+    ]) {
+      expect(rendered).not.toContain(sentinel);
+    }
+  });
 });

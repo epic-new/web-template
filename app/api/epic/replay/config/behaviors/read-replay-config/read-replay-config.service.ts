@@ -9,6 +9,7 @@ import {
   replayRecordingLimitsSchema,
   type PublicReplayConfig,
   type ReplayDisabledReason,
+  replayEnvironmentSchema,
   type ReplayEnvironment,
 } from "@/lib/replay/replay-config.contract";
 import { EpicClient, EpicIntegrationError } from "@/shared/integrations/epic/epic";
@@ -45,6 +46,9 @@ export class ReadReplayConfig {
       return disabledReplayConfig({ reason, environment, release, now: Date.now() });
     };
 
+    // An explicitly invalid environment never falls back to a default.
+    if (environment === null) return disabled("invalid_policy");
+
     const client = EpicClient.fromEnv(env);
     if (!client) return disabled("not_configured");
 
@@ -60,7 +64,10 @@ export class ReadReplayConfig {
     }
 
     const now = Date.now();
+    const enabled = resource.capture.enabled || resource.reporting.enabled;
     if (
+      (resource.configVersion !== null && resource.configVersion.trim() === "") ||
+      (resource.configVersion === null && enabled) ||
       resource.projectId !== client.projectId ||
       resource.environment !== environment ||
       resource.applicationId.trim() === "" ||
@@ -85,10 +92,11 @@ export class ReadReplayConfig {
     return result.data;
   }
 
-  private static resolveEnvironment(env: Env): ReplayEnvironment {
-    const explicit = env.EPIC_ENVIRONMENT as ReplayEnvironment | undefined;
-    if (explicit && (VERCEL_ENVIRONMENTS.has(explicit) || explicit === "test")) {
-      return explicit;
+  // Returns null when EPIC_ENVIRONMENT is present but not a valid environment.
+  private static resolveEnvironment(env: Env): ReplayEnvironment | null {
+    if (env.EPIC_ENVIRONMENT !== undefined) {
+      const explicit = replayEnvironmentSchema.safeParse(env.EPIC_ENVIRONMENT);
+      return explicit.success ? explicit.data : null;
     }
     const vercel = env.VERCEL_ENV as ReplayEnvironment | undefined;
     if (vercel && VERCEL_ENVIRONMENTS.has(vercel)) return vercel;

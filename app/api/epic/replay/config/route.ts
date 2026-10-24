@@ -1,7 +1,4 @@
-import {
-  disabledReplayConfig,
-  type ReplayEnvironment,
-} from "@/lib/replay/replay-config.contract";
+import { disabledReplayConfig } from "@/lib/replay/replay-config.contract";
 import { ReadReplayConfig } from "./behaviors/read-replay-config/read-replay-config.service";
 
 /**
@@ -23,12 +20,10 @@ export async function GET() {
     });
   } catch {
     console.warn("[replay-config]", "upstream_unavailable");
-    const environment: ReplayEnvironment =
-      process.env.NODE_ENV === "production" ? "production" : "development";
     return Response.json(
       disabledReplayConfig({
         reason: "upstream_unavailable",
-        environment,
+        environment: null,
         release: null,
         now: Date.now(),
       }),

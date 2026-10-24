@@ -11,6 +11,15 @@ export const replayConfigKeys = {
   all: ["replay-config"] as const,
 };
 
+// When each response reached the browser, on the monotonic clock. Kept beside
+// the cached data rather than in it, so the wire contract is unchanged and
+// reapplying cached data can never rebase its lifetime.
+const receipts = new WeakMap<PublicReplayConfig, number>();
+
+export function replayConfigReceipt(config: PublicReplayConfig): number | undefined {
+  return receipts.get(config);
+}
+
 export function replayConfigQuery() {
   return queryOptions({
     queryKey: replayConfigKeys.all,
@@ -22,8 +31,12 @@ export function replayConfigQuery() {
       if (!response.ok) {
         throw new Error(`Replay config request failed (${response.status})`);
       }
-      return publicReplayConfigSchema.parse(await response.json());
+      const config = publicReplayConfigSchema.parse(await response.json());
+      receipts.set(config, performance.now());
+      return config;
     },
+    // Every response keeps its own object, and with it its own receipt.
+    structuralSharing: false,
     staleTime: 0,
     refetchInterval: (query) =>
       query.state.data?.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS,
