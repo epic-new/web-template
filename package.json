@@ -29,6 +29,8 @@
     "@base-ui/react": "^1.1.0",
     "@hookform/resolvers": "^5.2.2",
     "@libsql/client": "^0.15.15",
+    "@rrweb/record": "2.2.0",
+    "@rrweb/types": "2.2.0",
     "@tanstack/react-query": "^5.101.0",
     "@tanstack/react-query-devtools": "^5.101.0",
     "@tanstack/react-table": "^8.21.3",
