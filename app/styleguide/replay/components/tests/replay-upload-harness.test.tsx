@@ -152,15 +152,16 @@ describe("ReplayUploadHarness", { timeout: 30_000 }, () => {
       target: "application", policySource: "application", eligibleHandoff: true, recoveryDebt: 2,
       provider: { status: "capturing", reason: null, reference, snapshotReceived: true, continuity: "resumed", evidence: "unverified" },
     });
-    expect(screen.getByLabelText("Reload continuity")).toHaveTextContent("Continued the same recording after reload");
-    expect(screen.getByLabelText("Reload continuity")).toHaveTextContent("playback not verified");
+    expect(screen.getByLabelText("Recording continuity")).toHaveTextContent("Continued the same recording; fresh snapshot received");
+    expect(screen.getByLabelText("Recording continuity")).toHaveTextContent("playback not verified");
+    expect(screen.getByLabelText("Recording continuity")).not.toHaveTextContent("after reload");
     expect(screen.getByText("Eligible acknowledged frontier")).toBeInTheDocument();
     expect(screen.getByText(/An open row can be stale or unresumed/)).toBeInTheDocument();
     show(upload("idle"), {
       target: "application", policySource: "application",
       provider: { status: "waiting", reason: "unresumed_open", reference: null, snapshotReceived: false, continuity: "handoff", evidence: "unverified" },
     });
-    expect(screen.getByLabelText("Reload continuity")).toHaveTextContent("server row may remain open");
+    expect(screen.getByLabelText("Recording continuity")).toHaveTextContent("server row may remain open");
     expect(screen.queryByText("Synthetic fixture - not Epic, not rrweb")).toBeNull();
   });
 });

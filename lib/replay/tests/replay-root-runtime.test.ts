@@ -9,6 +9,7 @@ import { createReplayHandoff, REPLAY_HANDOFF_STORAGE_KEY, type ReplayHandoffLedg
 import type { ReplayLockManager } from "../replay-ownership";
 import { epicReplayConsent } from "../replay-consent";
 import { activeReplayPolicy } from "./replay-policy.fixture";
+import { disabledReplayConfig, type PublicReplayConfig } from "../replay-config.contract";
 import { createSyntheticBrowserFetch, createSyntheticEpi210 } from "./synthetic-epi210.core";
 
 function recorder() {
@@ -123,6 +124,36 @@ describe("one root replay lifecycle", () => {
     expect(runtime.getDiagnostics().recoveryDebt).toBe(3);
   });
 
+  it("replenishes exhausted recovery only after a deliberate policy disable and enable", async () => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    let policy = activeReplayPolicy();
+    const changes = new Set<() => void>();
+    const { runtime, fake } = setup({ fetch: browser.fetch, getPolicy: () => policy,
+      subscribePolicy: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; } });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    for (let i = 0; i < 4; i++) { fixture.setMode("delivery_uncertain_next"); fake.event(); await flush(10_100); }
+    expect(runtime.getSnapshot().status).toBe("unavailable");
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(3);
+    const count = browser.log.filter((entry) => entry.path === "/recordings").length;
+    const active = policy;
+    policy = disabledReplayConfig({ reason: "unavailable", environment: active.environment, release: active.release, now: Date.now() });
+    for (const notify of changes) notify();
+    policy = active;
+    for (const notify of changes) notify();
+    await flush(1_000);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(count);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(3);
+    policy = { ...active, capture: { ...active.capture, enabled: false } };
+    for (const notify of changes) notify();
+    policy = { ...active, fetchedAt: Date.now(), expiresAt: Date.now() + 60_000 };
+    for (const notify of changes) notify();
+    await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", snapshotReceived: true });
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(count + 1);
+  });
+
   it("stops at inactivity and starts a fresh boundary only after user activity", async () => {
     const { runtime, browser } = setup({ lifecycle: { maxDurationMs: 60_000, inactivityMs: 30_000 } });
     runtime.setIdentity(null); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
@@ -172,6 +203,86 @@ describe("one root replay lifecycle", () => {
     expect(runtime.getSnapshot().reference?.recordingId).not.toBe(previous?.recordingId);
   });
 
+  it("pauses same-subject auth revalidation and continues the acknowledged recording with a fresh snapshot", async () => {
+    const { locks } = ownershipFixture();
+    const { runtime, fake, browser } = setup({ locks });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    const reference = runtime.getSnapshot().reference!;
+    runtime.beginIdentityRevalidation();
+    const count = browser.log.length;
+    fake.event(); await flush(2_000);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "waiting", reason: "identity_pending", reference: null });
+    expect(browser.log).toHaveLength(count);
+    runtime.setIdentity("user-1"); await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({
+      status: "capturing", reference: { recordingId: reference.recordingId, startedAt: reference.startedAt },
+      continuity: "resumed", snapshotReceived: true,
+    });
+    expect(browser.log.filter((entry) => entry.path.endsWith("/batches"))).toEqual([
+      expect.objectContaining({ recordingId: reference.recordingId, sequence: 0, firstEventTypes: [4, 2], final: false }),
+      expect.objectContaining({ recordingId: reference.recordingId, sequence: 1, firstEventTypes: [4, 2], final: false }),
+    ]);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
+    expect(fake.record).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains a clean frontier while same-subject auth and fresh policy settle in either order", async () => {
+    const active = activeReplayPolicy();
+    let policy: PublicReplayConfig = active;
+    const changes = new Set<() => void>();
+    const { runtime, browser, fake } = setup({ getPolicy: () => policy, subscribePolicy: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; } });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    const reference = runtime.getSnapshot().reference!;
+    runtime.beginIdentityRevalidation();
+    policy = disabledReplayConfig({ reason: "unavailable", environment: active.environment, release: active.release, now: Date.now() });
+    for (const notify of changes) notify();
+    runtime.setIdentity("user-1"); await flush(2_000);
+    expect(fake.record).toHaveBeenCalledTimes(1);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "waiting", reason: "policy_pending", reference: null });
+    policy = { ...active, release: "backend-B", fetchedAt: Date.now(), expiresAt: Date.now() + 60_000 };
+    for (const notify of changes) notify();
+    await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ reference: { recordingId: reference.recordingId, startedAt: reference.startedAt }, continuity: "resumed", snapshotReceived: true });
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(2);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
+  });
+
+  it.each(["dirty", "different_subject", "explicit_change", "withdrawal", "expired", "failed"] as const)("rejects retained attribution after %s during auth revalidation", async (change) => {
+    const active = activeReplayPolicy();
+    let policy: PublicReplayConfig = active;
+    const changes = new Set<() => void>();
+    const { runtime, browser, fake } = setup({ getPolicy: () => policy, subscribePolicy: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; } });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    const original = runtime.getSnapshot().reference!;
+    if (change === "dirty") fake.event();
+    runtime.beginIdentityRevalidation();
+    if (change === "explicit_change") runtime.beginIdentityChange();
+    if (change === "withdrawal") epicReplayConsent.withdraw();
+    if (change === "failed") runtime.failIdentityRevalidation();
+    if (change === "expired") {
+      policy = disabledReplayConfig({ reason: "expired", environment: active.environment, release: active.release, now: Date.now() });
+      for (const notify of changes) notify();
+    }
+    if (change !== "failed") runtime.setIdentity(change === "different_subject" ? "user-2" : "user-1");
+    await flush(5_100);
+    expect(runtime.getSnapshot().reference?.recordingId).not.toBe(original.recordingId);
+    expect(browser.log.filter((entry) => entry.recordingId === original.recordingId && entry.path.endsWith("/batches"))).toHaveLength(1);
+    if (["withdrawal", "expired", "failed"].includes(change)) expect(runtime.getSnapshot().reference).toBeNull();
+    else expect(runtime.getSnapshot().status).toBe("capturing");
+    if (change === "failed") expect(runtime.getSnapshot()).toMatchObject({ status: "unavailable", reason: "identity_unavailable" });
+  });
+
+  it("does not reset the original inactivity deadline after a same-subject refresh", async () => {
+    const { runtime } = setup({ lifecycle: { maxDurationMs: 60_000, inactivityMs: 30_000 } });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(20_100);
+    const original = runtime.getSnapshot().reference!;
+    runtime.beginIdentityRevalidation(); await flush(2_000);
+    runtime.setIdentity("user-1"); await flush(5_100);
+    expect(runtime.getSnapshot().reference?.recordingId).toBe(original.recordingId);
+    await flush(3_000);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "waiting", reason: "inactive", reference: null });
+  });
+
   it("keeps recorder failures terminal without repeating identity bootstrap on timer ticks", async () => {
     const record = vi.fn(() => { throw new Error("blocked recorder"); }) as unknown as typeof rrwebRecord;
     const { runtime, browser } = setup({ pipelineOptions: { record } });
@@ -186,7 +297,7 @@ describe("one root replay lifecycle", () => {
   it("continues a clean reload under the same durable recording and consumes its checkpoint once", async () => {
     const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
     const { locks, ledger } = ownershipFixture();
-    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now() });
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now(), epochNow: Date.now });
     const original = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } }).runtime;
     original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant();
     await flush(5_100);
@@ -205,10 +316,28 @@ describe("one root replay lifecycle", () => {
     expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
   });
 
+  it("preserves an offered reload checkpoint through delayed same-subject auth revalidation", async () => {
+    const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
+    const { locks, ledger } = ownershipFixture();
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: Date.now, epochNow: Date.now });
+    const original = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } }).runtime;
+    original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant(); await flush(5_100);
+    const reference = original.getSnapshot().reference!;
+    window.dispatchEvent(new PageTransitionEvent("pagehide")); original.dispose(); epicReplayConsent.reset();
+    const successor = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "reload", opener: false } }).runtime;
+    successor.setIdentity("user-1"); successor.attach();
+    successor.beginIdentityRevalidation(); epicReplayConsent.grant(); await flush(2_000);
+    expect(successor.getSnapshot().reference).toBeNull();
+    expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).not.toBeNull();
+    successor.setIdentity("user-1"); await flush(5_100);
+    expect(successor.getSnapshot()).toMatchObject({ reference: { recordingId: reference.recordingId, startedAt: reference.startedAt }, continuity: "resumed", snapshotReceived: true });
+    expect(successor.getDiagnostics().recoveryDebt).toBe(0);
+  });
+
   it("rejects an advanced resume cursor and rotates without adopting it", async () => {
     const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
     const { locks, ledger } = ownershipFixture();
-    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now() });
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now(), epochNow: Date.now });
     const original = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } }).runtime;
     original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant(); await flush(5_100);
     const reference = original.getSnapshot().reference!;
@@ -234,11 +363,34 @@ describe("one root replay lifecycle", () => {
     expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(3);
   });
 
+  it("rotates a closed first resumed append without carrying its spent handoff deadline into fresh capture", async () => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    const { locks, ledger } = ownershipFixture();
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: Date.now, epochNow: Date.now });
+    const original = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } }).runtime;
+    original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant(); await flush(5_100);
+    const reference = original.getSnapshot().reference!;
+    window.dispatchEvent(new PageTransitionEvent("pagehide")); original.dispose(); epicReplayConsent.reset();
+    let rejectAppend = true;
+    const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (rejectAppend && String(input).endsWith("/batches")) { rejectAppend = false; fixture.closeRecording(reference.recordingId); }
+      return browser.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const successor = setup({ fetch, locks, handoff: handoff(), navigation: { type: "reload", opener: false } }).runtime;
+    successor.setIdentity("user-1"); successor.attach(); epicReplayConsent.grant(); await flush(16_100);
+    expect(successor.getSnapshot()).toMatchObject({ status: "capturing", continuity: "new_recording", snapshotReceived: true });
+    expect(successor.getSnapshot().reference!.recordingId).not.toBe(reference.recordingId);
+    expect(successor.getDiagnostics().recoveryDebt).toBe(1);
+    expect(browser.log.filter((entry) => entry.recordingId === reference.recordingId && entry.path.endsWith("/batches")))
+      .toEqual([expect.objectContaining({ sequence: 0, status: 200 }), expect.objectContaining({ sequence: 1, code: "recording_closed" })]);
+  });
+
   it("reports a new registered recording after a resumed stream later becomes delivery-uncertain", async () => {
     const fixture = createSyntheticEpi210();
     const browser = createSyntheticBrowserFetch(fixture);
     const { locks, ledger } = ownershipFixture();
-    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now() });
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now(), epochNow: Date.now });
     const original = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } }).runtime;
     original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant(); await flush(5_100);
     const originalReference = original.getSnapshot().reference!;
@@ -270,7 +422,7 @@ describe("one root replay lifecycle", () => {
   it("falls back fresh when a handoff expires while its identity acknowledgment is delayed", async () => {
     const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
     const { locks, ledger } = ownershipFixture();
-    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now() });
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now(), epochNow: Date.now });
     const original = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } }).runtime;
     original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant(); await flush(5_100);
     const originalReference = original.getSnapshot().reference!;
@@ -308,7 +460,7 @@ describe("one root replay lifecycle", () => {
   it.each(["duration", "inactivity"] as const)("never captures the resumed stream after its remaining %s expires during registration", async (bound) => {
     const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
     const { locks, ledger } = ownershipFixture();
-    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now() });
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: () => Date.now(), epochNow: Date.now });
     const lifecycle = bound === "duration"
       ? { maxDurationMs: 60_000, inactivityMs: 60_000 }
       : { maxDurationMs: 120_000, inactivityMs: 30_000 };

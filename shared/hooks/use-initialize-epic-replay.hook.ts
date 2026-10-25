@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { authClient } from "@/lib/auth/client";
 import { useRefreshReplayPolicy } from "@/app/api/epic/replay/config/behaviors/refresh-replay-policy/use-refresh-replay-policy.hook";
 import { replayIdentityBoundaryPending, subscribeReplayIdentityBoundary } from "@/lib/replay/replay-identity";
+import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
 import type { ReplayRootOptions, ReplayRootRuntime } from "@/lib/replay/replay-root-runtime";
 
 type RuntimeModule = typeof import("@/lib/replay/replay-root-runtime");
@@ -31,20 +32,28 @@ function refreshIdentity(host: DocumentHost) {
   const controller = new AbortController();
   host.refreshController = controller;
   host.pendingIdentity = true;
-  host.identity = undefined;
-  host.runtime?.beginIdentityChange();
-  if (replayIdentityBoundaryPending()) return;
-  const deadline = setTimeout(() => controller.abort(), 12_000);
+  if (replayIdentityBoundaryPending()) { host.runtime?.beginIdentityChange(); return; }
+  host.runtime?.beginIdentityRevalidation();
+  const fail = () => {
+    if (run !== host.refreshEpoch || !host.attachments.size) return;
+    host.identity = undefined;
+    host.runtime?.failIdentityRevalidation();
+  };
+  const deadline = setTimeout(() => { controller.abort(); fail(); }, 12_000);
   void authClient.getSession({ fetchOptions: { signal: controller.signal } }).then((result) => {
-    if (run !== host.refreshEpoch || controller.signal.aborted || !host.attachments.size || result.error) return;
+    if (run !== host.refreshEpoch || controller.signal.aborted || !host.attachments.size) return;
+    if (result.error) { fail(); return; }
     host.identity = result.data?.user.id ?? null;
     host.pendingIdentity = false;
     host.runtime?.setIdentity(host.identity);
-  }).catch(() => { /* Host auth failure blocks replay, never the auth operation. */ })
+  }).catch(fail)
     .finally(() => { clearTimeout(deadline); });
 }
 
 function watchIdentity(host: DocumentHost) {
+  // Clock drift and document resume also gate the existing policy owner, even
+  // when the browser emits neither focus nor visibility restoration.
+  const stopGate = replayLifecycle.subscribeGate(() => { if (!host.pendingIdentity) refreshIdentity(host); });
   const unsubscribe = subscribeReplayIdentityBoundary((event) => {
     if (event.phase === "begin") {
       host.refreshEpoch++;
@@ -61,16 +70,19 @@ function watchIdentity(host: DocumentHost) {
     else if (wasHidden) { wasHidden = false; refreshIdentity(host); }
   };
   const show = (event: PageTransitionEvent) => { if (event.persisted) refreshIdentity(host); };
-  window.addEventListener("focus", focus);
-  document.addEventListener("visibilitychange", visibility);
-  window.addEventListener("pageshow", show);
+  // Pause before the policy hook's bubble listeners withhold its old receipt.
+  // A pending same-subject refresh retains only a clean, owned frontier.
+  window.addEventListener("focus", focus, true);
+  document.addEventListener("visibilitychange", visibility, true);
+  window.addEventListener("pageshow", show, true);
   return () => {
     host.refreshEpoch++;
     host.refreshController?.abort();
     unsubscribe();
-    window.removeEventListener("focus", focus);
-    document.removeEventListener("visibilitychange", visibility);
-    window.removeEventListener("pageshow", show);
+    stopGate();
+    window.removeEventListener("focus", focus, true);
+    document.removeEventListener("visibilitychange", visibility, true);
+    window.removeEventListener("pageshow", show, true);
   };
 }
 
@@ -90,10 +102,19 @@ export function useInitializeEpicReplay(options: Pick<ReplayRootOptions, "docume
   useLayoutEffect(() => {
     identity.current = key;
     const host = hostRef.current;
-    if (!host || host.pendingIdentity) return;
+    if (!host) return;
+    if (session.error) { host.runtime?.failIdentityRevalidation(); return; }
+    if (host.pendingIdentity) {
+      // An observed account switch supersedes an older refresh. An explicit
+      // auth operation must settle through its barrier before any identity wins.
+      if (key === undefined || host.identity === undefined || key === host.identity || replayIdentityBoundaryPending()) return;
+      host.refreshEpoch++;
+      host.refreshController?.abort();
+      host.pendingIdentity = false;
+    }
     host.identity = key;
     host.runtime?.setIdentity(key);
-  }, [key]);
+  }, [key, session.error]);
 
   useEffect(() => {
     let host = hosts().get(document);
@@ -116,7 +137,7 @@ export function useInitializeEpicReplay(options: Pick<ReplayRootOptions, "docume
 
     const attach = () => {
       if (!current.runtime || !current.attachments.has(attachment)) return;
-      current.runtime.setIdentity(current.identity);
+      current.runtime.setIdentity(current.pendingIdentity ? undefined : current.identity);
       attachment.detach = current.runtime.attach();
       attachment.setRuntime(current.runtime);
     };

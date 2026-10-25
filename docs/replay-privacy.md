@@ -304,6 +304,20 @@ The reload window starts at the clean offer and cannot be extended by retries;
 preparation itself has a 60-second cap. Duration/inactivity/recovery debt is
 carried forward. Expired metadata prevents reuse, not server cleanup.
 
+Checkpoints compare wall time with `performance.timeOrigin + performance.now()`
+from both documents. Missing, backward, or inconsistent clock proof is rejected;
+the larger valid elapsed delta consumes the remaining window and lifecycle
+limits. This monotonic comparison only applies within one user-agent execution,
+not a browser restart or isolated sessions. A wall-clock rollback cannot extend
+the offer. Identity, lock, registration, and successor snapshot work share that
+same deadline.
+
+Focus/visibility authentication revalidation pauses admission before the policy
+refresh. A clean, owned acknowledged frontier may wait for the same subject and
+fresh policy, then retry its exact registration and append a fresh snapshot.
+This preserves the original recording/start/release and recovery debt. Dirty,
+expired, changed-account or failed revalidation closes that local boundary.
+
 Pagehide cannot know whether a successor will reload. A skipped final with no
 successor leaves a stale unresumed open row; current central v1 has no idle-close
 operation. Open is never evidence of active recording. Dirty/unacknowledged
@@ -324,3 +338,10 @@ The synthetic fixture is not Cloud receipt, append/playback or production-readin
 evidence. Native browser verification remains a separate read-only phase, using
 synthetic accounts/content and a controlled relay fixture surviving documents.
 No live customer capture is needed for these local tests.
+
+The bounded [local verification relay](replay-verification.md) now provides
+process-memory state across browser reloads, deterministic cursor/closed-append/
+lost-receipt faults, and metadata-only diagnostics. Tests exercise root runtime
+through the real BFF, identity cookies, Services and SQLite against it. Its
+schema is a local fixture of the v1 contract, not the actual central schema.
+Native Epic-host, central-schema and Cloud playback acceptance remain separate.

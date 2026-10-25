@@ -170,7 +170,7 @@ export function createReplayRecordingPipeline({
     },
     commitHandoff(): void { uploader.commitHandoff(); changed(); },
     flushOnPageHide(): void { uploader.flushOnPageHide(); },
-    async resumeFromCheckpoint(checkpoint: ReplayUploadCheckpoint, options: { signal?: AbortSignal; deadline?: number } = {}): Promise<boolean> {
+    async resumeFromCheckpoint(checkpoint: ReplayUploadCheckpoint, options: { signal?: AbortSignal; deadline?: number; revalidate?: boolean } = {}): Promise<boolean> {
       const restored = await uploader.resumeFromCheckpoint(checkpoint, session.getState().boundary + 1, options);
       if (!restored || options.signal?.aborted || getCaptureAllowed?.() === false) {
         session.retireUnstartedBoundary();

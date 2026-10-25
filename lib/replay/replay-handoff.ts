@@ -14,6 +14,7 @@ const DATABASE = "epic-replay-handoff-v1";
 const STORE = "generations";
 
 const timestamp = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const epochTimestamp = z.number().positive().max(Number.MAX_SAFE_INTEGER);
 const contextSchema = z.object({
   fingerprint: z.string().min(1).max(4_096),
   documentRelease: z.string().min(1).max(128).regex(/^[A-Za-z0-9._+\-/]+$/),
@@ -30,6 +31,7 @@ const preparedSchema = z.object({
   upload: replayUploadCheckpointSchema,
   context: contextSchema,
   preparedAt: timestamp,
+  preparedEpochMs: epochTimestamp,
   armedUntil: timestamp,
   windowMs: z.number().int().min(1_000).max(30_000),
 }).strict().refine((value) =>
@@ -44,13 +46,18 @@ export type PreparedReplayHandoff = z.infer<typeof preparedSchema>;
 export const replayHandoffCandidateSchema = z.object({
   prepared: preparedSchema,
   offeredAt: timestamp,
+  offeredEpochMs: epochTimestamp,
   expiresAt: timestamp,
   elapsedBeforeOfferMs: z.number().int().nonnegative().max(PREARM_TTL_MS),
 }).strict().refine((value) =>
   value.offeredAt >= value.prepared.preparedAt &&
   value.offeredAt < value.prepared.armedUntil &&
+  value.offeredEpochMs >= value.prepared.preparedEpochMs &&
+  value.offeredEpochMs < value.prepared.preparedEpochMs + PREARM_TTL_MS &&
+  Math.abs((value.offeredAt - value.prepared.preparedAt) - (value.offeredEpochMs - value.prepared.preparedEpochMs)) <= CLOCK_DRIFT_TOLERANCE_MS &&
   value.expiresAt === Math.min(value.offeredAt + value.prepared.windowMs, value.prepared.armedUntil) &&
   value.elapsedBeforeOfferMs >= value.offeredAt - value.prepared.preparedAt &&
+  value.elapsedBeforeOfferMs >= value.offeredEpochMs - value.prepared.preparedEpochMs &&
   value.elapsedBeforeOfferMs < value.prepared.context.remainingDurationMs &&
   value.elapsedBeforeOfferMs < value.prepared.context.remainingInactivityMs,
 "Invalid checkpoint clocks or elapsed lifecycle limits");
@@ -195,11 +202,34 @@ function serialized(value: unknown): string | null {
   } catch { return null; }
 }
 
+/**
+ * Epoch-relative monotonic time is comparable between documents in one browser
+ * execution, unlike performance.now() by itself. It is not a browser-restart or
+ * isolated-session proof: https://www.w3.org/TR/hr-time-3/#sec-time-origin.
+ */
+function browserEpochNow(): number {
+  try {
+    const origin = performance.timeOrigin;
+    const elapsed = performance.now();
+    return Number.isFinite(origin) && origin > 0 && Number.isFinite(elapsed) && elapsed >= 0
+      ? origin + elapsed : NaN;
+  } catch { return NaN; }
+}
+
+function elapsedTime(wallStart: number, epochStart: number, wallNow: number, epochNow: number): number | null {
+  if (!timestamp.safeParse(wallNow).success || !epochTimestamp.safeParse(epochNow).success) return null;
+  const wallElapsed = wallNow - wallStart;
+  const epochElapsed = epochNow - epochStart;
+  if (wallElapsed < 0 || epochElapsed < 0 || Math.abs(wallElapsed - epochElapsed) > CLOCK_DRIFT_TOLERANCE_MS) return null;
+  return Math.ceil(Math.max(wallElapsed, epochElapsed));
+}
+
 export function createReplayHandoff({
   storage = sessionStorageOrNull(),
   ledger = createIndexedDBReplayHandoffLedger(),
   now = () => Date.now(),
   monotonicNow = () => performance.now(),
+  epochNow = browserEpochNow,
   randomUUID = () => crypto.randomUUID(),
   windowMs = REPLAY_HANDOFF_DEFAULT_WINDOW_MS,
 }: {
@@ -207,6 +237,8 @@ export function createReplayHandoff({
   ledger?: ReplayHandoffLedger;
   now?: () => number;
   monotonicNow?: () => number;
+  /** Same-browser epoch-relative monotonic clock; never a document-local timer. */
+  epochNow?: () => number;
   randomUUID?: () => string;
   windowMs?: number;
 } = {}) {
@@ -225,9 +257,27 @@ export function createReplayHandoff({
     if (old) void ledger.remove(old.value.generation).catch(() => {});
   }
 
-  function remaining(candidate: ReplayHandoffCandidate, at: number): ReplayHandoffContext | null {
-    if (at < candidate.offeredAt || at >= candidate.expiresAt) return null;
-    const elapsed = candidate.elapsedBeforeOfferMs + at - candidate.offeredAt;
+  function timeSinceOffer(candidate: ReplayHandoffCandidate): number | null {
+    try { return elapsedTime(candidate.offeredAt, candidate.offeredEpochMs, now(), epochNow()); }
+    catch { return null; }
+  }
+
+  function remainingWindowMs(candidate: ReplayHandoffCandidate): number {
+    if (!replayHandoffCandidateSchema.safeParse(candidate).success) return 0;
+    const elapsed = timeSinceOffer(candidate);
+    if (elapsed === null) return 0;
+    // The prearm lifetime also runs on both clocks, so offering late cannot
+    // lengthen it even when a small clock discrepancy is within tolerance.
+    return Math.max(0, Math.floor(Math.min(
+      candidate.expiresAt - candidate.offeredAt,
+      PREARM_TTL_MS - (candidate.offeredEpochMs - candidate.prepared.preparedEpochMs),
+    ) - elapsed));
+  }
+
+  function remaining(candidate: ReplayHandoffCandidate): ReplayHandoffContext | null {
+    const sinceOffer = timeSinceOffer(candidate);
+    if (sinceOffer === null || remainingWindowMs(candidate) <= 0) return null;
+    const elapsed = candidate.elapsedBeforeOfferMs + sinceOffer;
     const context = candidate.prepared.context;
     const duration = context.remainingDurationMs - elapsed;
     const inactivity = context.remainingInactivityMs - elapsed;
@@ -240,7 +290,7 @@ export function createReplayHandoff({
       const raw = storage?.getItem(REPLAY_HANDOFF_STORAGE_KEY);
       if (!raw || new TextEncoder().encode(raw).byteLength > REPLAY_HANDOFF_MAX_BYTES) return null;
       const value = replayHandoffCandidateSchema.safeParse(JSON.parse(raw));
-      return value.success && remaining(value.data, now()) ? value.data : null;
+      return value.success && remaining(value.data) ? value.data : null;
     } catch { return null; }
   }
 
@@ -249,11 +299,16 @@ export function createReplayHandoff({
       invalidate();
       const generation = epoch;
       if (!storage || !Number.isInteger(windowMs) || windowMs < 1_000 || windowMs > 30_000) return null;
-      const at = now();
-      const monotonic = monotonicNow();
+      let at: number;
+      let monotonic: number;
+      let epochAt: number;
       let parsed: ReturnType<typeof preparedSchema.safeParse>;
       try {
-        parsed = preparedSchema.safeParse({ version: 1, generation: randomUUID(), upload, context, preparedAt: at, armedUntil: at + PREARM_TTL_MS, windowMs });
+        at = now();
+        monotonic = monotonicNow();
+        epochAt = epochNow();
+        if (!Number.isFinite(monotonic) || monotonic < 0) return null;
+        parsed = preparedSchema.safeParse({ version: 1, generation: randomUUID(), upload, context, preparedAt: at, preparedEpochMs: epochAt, armedUntil: at + PREARM_TTL_MS, windowMs });
       } catch { return null; }
       if (!parsed.success) return null;
       const value = parsed.data;
@@ -262,7 +317,8 @@ export function createReplayHandoff({
       try {
         const accepted = await ledger.arm({ generation: value.generation, recordingId: upload.recordingId, proof, expiresAt: value.armedUntil, consumed: false }, at);
         if (!accepted) return null;
-        if (generation !== epoch || now() < at || now() >= value.armedUntil) {
+        const elapsed = elapsedTime(at, epochAt, now(), epochNow());
+        if (generation !== epoch || elapsed === null || elapsed >= PREARM_TTL_MS) {
           void ledger.remove(value.generation).catch(() => {});
           return null;
         }
@@ -275,10 +331,14 @@ export function createReplayHandoff({
     offer(prepared: PreparedReplayHandoff, upload: ReplayUploadCheckpoint, context: ReplayHandoffContext, lease: ReplayOwnershipLease, { persisted = false }: { persisted?: boolean } = {}): boolean {
       const current = armed;
       if (!current || current.value !== prepared || !contextSchema.safeParse(context).success || persisted || !lease.isHeld() || lease.name !== replayRecordingLockName(upload.recordingId)) return false;
-      const at = now();
+      let at: number;
+      let epochAt: number;
+      let monotonic: number;
+      try { at = now(); epochAt = epochNow(); monotonic = monotonicNow(); } catch { return false; }
       const wallElapsed = at - prepared.preparedAt;
-      const monoElapsed = monotonicNow() - current.monotonic;
-      if (wallElapsed < 0 || monoElapsed < 0 || Math.abs(wallElapsed - monoElapsed) > CLOCK_DRIFT_TOLERANCE_MS || !matchingContext(prepared.context, context)) return false;
+      const monoElapsed = monotonic - current.monotonic;
+      const elapsed = elapsedTime(prepared.preparedAt, prepared.preparedEpochMs, at, epochAt);
+      if (elapsed === null || elapsed >= PREARM_TTL_MS || !Number.isFinite(monoElapsed) || monoElapsed < 0 || Math.abs(wallElapsed - monoElapsed) > CLOCK_DRIFT_TOLERANCE_MS || !matchingContext(prepared.context, context)) return false;
       const parsedUpload = replayUploadCheckpointSchema.safeParse(upload);
       if (!parsedUpload.success || JSON.stringify(parsedUpload.data) !== JSON.stringify(prepared.upload)) return false;
       // Changes to debt or shorter host limits require a new preparation.
@@ -286,12 +346,13 @@ export function createReplayHandoff({
       const candidate = replayHandoffCandidateSchema.safeParse({
         prepared,
         offeredAt: at,
+        offeredEpochMs: epochAt,
         expiresAt: Math.min(at + windowMs, prepared.armedUntil),
-        elapsedBeforeOfferMs: Math.ceil(Math.max(wallElapsed, monoElapsed,
+        elapsedBeforeOfferMs: Math.ceil(Math.max(elapsed, monoElapsed,
           prepared.context.remainingDurationMs - context.remainingDurationMs,
           prepared.context.remainingInactivityMs - context.remainingInactivityMs)),
       });
-      if (!candidate.success || !remaining(candidate.data, now())) return false;
+      if (!candidate.success || !remaining(candidate.data)) return false;
       const json = serialized(candidate.data);
       if (!json) return false;
       try {
@@ -321,11 +382,11 @@ export function createReplayHandoff({
       const value = parsed.data;
       if (signal?.aborted || !lease.isHeld() || lease.name !== replayRecordingLockName(value.prepared.upload.recordingId) || !matchingContext(value.prepared.context, context)) return null;
       const proof = serialized(value.prepared);
-      if (!proof || !remaining(value, now())) return null;
+      if (!proof || !remaining(value)) return null;
       try {
         if (!await ledger.consume(value.prepared.generation, proof, now())) return null;
         // Even cancellation/expiry after the transaction permanently spends it.
-        const limits = remaining(value, now());
+        const limits = remaining(value);
         if (!limits || signal?.aborted || !lease.isHeld()) return null;
         return { candidate: value, remaining: {
           ...limits,
@@ -338,6 +399,7 @@ export function createReplayHandoff({
 
     invalidate,
     clear: invalidate,
+    remainingWindowMs,
   };
 }
 

@@ -93,9 +93,9 @@ export function ReplayUploadReadout() {
           <Badge variant="outline" aria-label="Provider state">
             Root provider: {state.provider.status}{state.provider.reason ? ` - ${state.provider.reason.replace(/_/g, ' ')}` : ''}
           </Badge>
-          <p className="text-sm text-muted-foreground" aria-label="Reload continuity">
-            {state.provider.continuity === 'resumed' && 'Continued the same recording after reload; fresh snapshot received, playback not verified.'}
-            {state.provider.continuity === 'resuming' && 'Checking reload continuity; the recording has not resumed yet.'}
+          <p className="text-sm text-muted-foreground" aria-label="Recording continuity">
+            {state.provider.continuity === 'resumed' && 'Continued the same recording; fresh snapshot received, playback not verified.'}
+            {state.provider.continuity === 'resuming' && 'Checking recording continuity; the recording has not resumed yet.'}
             {state.provider.continuity === 'new_recording' && 'New recording; previous continuity could not be established.'}
             {state.provider.continuity === 'handoff' && 'Unresumed handoff; the server row may remain open.'}
             {state.provider.continuity === 'fresh' && 'Fresh recording boundary.'}

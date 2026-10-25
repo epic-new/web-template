@@ -122,4 +122,18 @@ describe("replayLifecycle", () => {
     replayLifecycle.apply(fresh, { receivedAt: 3_000 });
     expect(replayLifecycle.getSnapshot()).toEqual(fresh);
   });
+
+  it("closes host admission before policy suspension and removes its gate observer", () => {
+    const monotonic = vi.spyOn(performance, "now").mockReturnValue(1_000);
+    replayLifecycle.apply(activeConfig());
+    const order: string[] = [];
+    const stop = replayLifecycle.subscribeGate(() => { order.push("identity-paused"); });
+    replayLifecycle.subscribe(() => { order.push("policy-withheld"); });
+    monotonic.mockReturnValue(2_000);
+    replayLifecycle.gate();
+    expect(order).toEqual(["identity-paused", "policy-withheld"]);
+    stop();
+    replayLifecycle.gate();
+    expect(order).toEqual(["identity-paused", "policy-withheld"]);
+  });
 });

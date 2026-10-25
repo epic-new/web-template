@@ -5,6 +5,7 @@ import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-libr
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EpicReplaySnapshot, ReplayRootRuntime } from "@/lib/replay/replay-root-runtime";
 import { beginReplayIdentityBoundary } from "@/lib/replay/replay-identity";
+import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
 import { EpicReplayProvider } from "../epic-replay-provider";
 import { EMPTY_EPIC_REPLAY, EpicReplayContext, useEpicReplay, useEpicReplayDiagnostics } from "@/shared/hooks/use-epic-replay.hook";
 
@@ -27,7 +28,7 @@ function fakeRuntime() {
   let maximum = 0;
   const value = {
     attach: vi.fn(() => { attached++; maximum = Math.max(attached, maximum); return () => { attached--; }; }),
-    setIdentity: vi.fn(), beginIdentityChange: vi.fn(), start: vi.fn(), stop: vi.fn(), restart: vi.fn(), dispose: vi.fn(),
+    setIdentity: vi.fn(), beginIdentityChange: vi.fn(), beginIdentityRevalidation: vi.fn(), failIdentityRevalidation: vi.fn(), start: vi.fn(), stop: vi.fn(), restart: vi.fn(), dispose: vi.fn(),
     getSnapshot: () => state,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     getDiagnostics: () => diagnostics,
@@ -55,7 +56,7 @@ describe("EpicReplayProvider and public hook", () => {
     boundary.session = { isPending: false, error: null, data: { user: { id: "user-1" } } };
     sessionStorage.clear();
   });
-  afterEach(() => { cleanup(); Reflect.deleteProperty(document, "visibilityState"); vi.restoreAllMocks(); });
+  afterEach(() => { cleanup(); Reflect.deleteProperty(document, "visibilityState"); vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it("renders children and a harmless stable fallback without a provider or server runtime", () => {
     const { result, rerender } = renderHook(() => useEpicReplay());
@@ -153,7 +154,7 @@ describe("EpicReplayProvider and public hook", () => {
     render(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
     await waitFor(() => expect(fixture.attached()).toBe(1));
     act(() => { window.dispatchEvent(new Event("focus")); });
-    expect(fixture.value.beginIdentityChange).toHaveBeenCalledTimes(1);
+    expect(fixture.value.beginIdentityRevalidation).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-2"));
     act(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
@@ -161,12 +162,12 @@ describe("EpicReplayProvider and public hook", () => {
       Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    expect(fixture.value.beginIdentityChange).toHaveBeenCalledTimes(2);
+    expect(fixture.value.beginIdentityRevalidation).toHaveBeenCalledTimes(2);
     await act(async () => { await Promise.resolve(); });
     const restored = new Event("pageshow");
     Object.defineProperty(restored, "persisted", { value: true });
     act(() => { window.dispatchEvent(restored); });
-    expect(fixture.value.beginIdentityChange).toHaveBeenCalledTimes(3);
+    expect(fixture.value.beginIdentityRevalidation).toHaveBeenCalledTimes(3);
     await act(async () => { await Promise.resolve(); });
     expect(boundary.getSession).toHaveBeenCalledTimes(3);
   });
@@ -188,5 +189,80 @@ describe("EpicReplayProvider and public hook", () => {
     finish();
     await waitFor(() => expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-2"));
     expect(boundary.getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses revalidation before visibility policy listeners and discards a failed refresh", async () => {
+    const fixture = fakeRuntime();
+    boundary.createRuntime.mockReturnValue(fixture.runtime);
+    let settle!: (result: { data: null; error: { message: string } }) => void;
+    boundary.getSession.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    const policyListener = vi.fn(() => expect(fixture.value.beginIdentityRevalidation).toHaveBeenCalledOnce());
+    // Registered before the provider, as the existing policy effect is.
+    document.addEventListener("visibilitychange", policyListener);
+    render(<EpicReplayProvider documentRelease="build-a"><span>Usable app</span><Readout /></EpicReplayProvider>);
+    await waitFor(() => expect(fixture.attached()).toBe(1));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.removeEventListener("visibilitychange", policyListener);
+    document.dispatchEvent(new Event("visibilitychange"));
+    document.addEventListener("visibilitychange", policyListener);
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(policyListener).toHaveBeenCalledOnce();
+    expect(fixture.value.beginIdentityChange).not.toHaveBeenCalled();
+    await act(async () => { settle({ data: null, error: { message: "offline" } }); });
+    expect(fixture.value.failIdentityRevalidation).toHaveBeenCalledOnce();
+    expect(screen.getByText("Usable app")).toBeInTheDocument();
+    document.removeEventListener("visibilitychange", policyListener);
+  });
+
+  it("cannot restore an older revalidation response over explicit or observed account changes", async () => {
+    const fixture = fakeRuntime();
+    boundary.createRuntime.mockReturnValue(fixture.runtime);
+    const pending: ((result: { data: { user: { id: string } }; error: null }) => void)[] = [];
+    boundary.getSession.mockImplementation(() => new Promise((resolve) => { pending.push(resolve); }));
+    const view = render(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    await waitFor(() => expect(fixture.attached()).toBe(1));
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    const finish = beginReplayIdentityBoundary();
+    finish();
+    await act(async () => { pending[0]!({ data: { user: { id: "user-1" } }, error: null }); });
+    expect(fixture.value.setIdentity).toHaveBeenCalledTimes(1); // Initial attachment only.
+    await act(async () => { pending[1]!({ data: { user: { id: "user-2" } }, error: null }); });
+    expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-2");
+    boundary.session = { isPending: false, error: null, data: { user: { id: "user-2" } } };
+    view.rerender(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    boundary.session = { isPending: false, error: null, data: { user: { id: "user-3" } } };
+    view.rerender(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-3");
+    await act(async () => { pending[2]!({ data: { user: { id: "user-2" } }, error: null }); });
+    expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-3");
+  });
+
+  it("revalidates auth on suspension clock gates even without focus or visibility events", async () => {
+    const fixture = fakeRuntime();
+    boundary.createRuntime.mockReturnValue(fixture.runtime);
+    boundary.getSession.mockResolvedValue({ data: { user: { id: "user-1" } }, error: null });
+    render(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    await waitFor(() => expect(fixture.attached()).toBe(1));
+    act(() => replayLifecycle.gate());
+    expect(fixture.value.beginIdentityRevalidation).toHaveBeenCalledOnce();
+    await waitFor(() => expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-1"));
+    expect(boundary.getSession).toHaveBeenCalledOnce();
+  });
+
+  it("bounds delayed auth refresh and ignores its late success", async () => {
+    const fixture = fakeRuntime();
+    boundary.createRuntime.mockReturnValue(fixture.runtime);
+    let settle!: (result: { data: { user: { id: string } }; error: null }) => void;
+    boundary.getSession.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    render(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    await waitFor(() => expect(fixture.attached()).toBe(1));
+    vi.useFakeTimers();
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await act(() => vi.advanceTimersByTimeAsync(12_000));
+    expect(fixture.value.failIdentityRevalidation).toHaveBeenCalledOnce();
+    await act(async () => { settle({ data: { user: { id: "too-late" } }, error: null }); });
+    expect(fixture.value.setIdentity).not.toHaveBeenCalledWith("too-late");
   });
 });

@@ -11,6 +11,7 @@ import { createReplayHandoff, type ReplayHandoff, type PreparedReplayHandoff, ty
 import { createReplayRecoveryBudget, publicDocumentRelease, replayContextFingerprint, replayLifecycleOptions, type ReplayLifecycleOptions } from "./replay-runtime-policy";
 import type { ReplayRecordingReference } from "./replay-uploader";
 import type { ReplayFetch } from "./replay-upload-contract";
+import type { ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
 
 export interface EpicReplaySnapshot {
   readonly status: "disabled" | "waiting" | "capturing" | "unavailable";
@@ -75,10 +76,14 @@ export function createReplayRootRuntime({
   let suspended = false;
   let leaving = false;
   let exhausted = false;
+  let deliberatelyDisabled = false;
   let idle = false;
   let identityKey: string | null | undefined;
   let previousIdentity: string | null | undefined;
   let identityReady = false;
+  let revalidatingIdentity = false;
+  let pausedIdentity: { checkpoint: ReplayUploadCheckpoint; policy: PublicReplayConfig; deadline: number; monotonicDeadline: number } | null = null;
+  let resumeCandidate: typeof candidate = null;
   let generation = 0;
   let pending: AbortController | null = null;
   let startup = false;
@@ -130,8 +135,13 @@ export function createReplayRootRuntime({
     generation++;
     pending?.abort(); pending = null;
     startup = false;
+    resuming = false;
     identityReady = false;
-    if (stop) pipeline?.stop();
+    if (stop) {
+      pausedIdentity = null;
+      resumeCandidate = null;
+      pipeline?.stop();
+    }
   }
   function handoffContext(): ReplayHandoffContext | null {
     const time = monotonicNow();
@@ -142,18 +152,31 @@ export function createReplayRootRuntime({
   }
   function update() {
     if (!pipeline) return;
-    if (leaving || suspended) { diagnosticsChanged(); return; }
+    if (leaving || suspended || idle || !requested || revalidatingIdentity || pausedIdentity) { diagnosticsChanged(); return; }
     const current = pipeline.getState();
     const progress = pipeline.getProgress();
     if (current.capture.boundary !== lastBoundary) {
       if (lastBoundary > 0) {
-        durationDeadline = monotonicNow() + lifecycle.maxDurationMs;
-        if (!resuming) continuity = "new_recording";
+        if (!resuming) {
+          durationDeadline = monotonicNow() + lifecycle.maxDurationMs;
+          continuity = "new_recording";
+          resumeCandidate = null;
+        }
       }
       lastBoundary = current.capture.boundary;
     }
     if ((current.upload.status === "unavailable" && !pipeline.isRecovering() && !resuming) || pipeline.hasCaptureFailure()) exhausted = true;
-    if (progress.continuity === "handoff" || (progress.continuity === "resumed" && current.upload.current?.boundary === current.capture.boundary)) continuity = progress.continuity;
+    if (resumeCandidate && handoff.remainingWindowMs(resumeCandidate) <= 0) {
+      resumeCandidate = null; cancel(); invalidateHandoff(); continuity = "new_recording";
+      if (!budget.take(getPolicy().recording.limits.maxAttempts)) exhausted = true;
+      publish({ status: exhausted ? "unavailable" : "waiting", reason: "handoff_expired", reference: null, snapshotReceived: false, continuity });
+      queueMicrotask(reconcile);
+      return;
+    }
+    if (progress.continuity === "handoff" || (progress.continuity === "resumed" && current.upload.current?.boundary === current.capture.boundary)) {
+      continuity = progress.continuity;
+      if (continuity === "resumed") resumeCandidate = null;
+    }
     publish({ status: exhausted ? "unavailable" : pipeline.isRecovering() ? "waiting" : current.capture.status === "capturing" ? "capturing" : "waiting",
       reason: pipeline.hasCaptureFailure() ? "recorder_unavailable" : exhausted ? current.upload.reason : current.capture.reason,
       reference: current.upload.current, snapshotReceived: progress.snapshotReceived, continuity });
@@ -208,17 +231,20 @@ export function createReplayRootRuntime({
     const run = ++generation;
     const valid = () => run === generation && !controller.signal.aborted && allowed();
     const offeredCandidate = candidate;
-    const deadline = offeredCandidate?.expiresAt ?? Infinity;
+    const deadline = offeredCandidate ? now() + handoff.remainingWindowMs(offeredCandidate) : pausedIdentity?.deadline ?? Infinity;
     publish({ status: "waiting", reason: "identity_pending" });
     try {
       if (!await identity.acknowledge({ signal: controller.signal, deadline }) || !valid()) {
-        if (valid() && offeredCandidate && now() >= deadline) {
+        if (valid() && offeredCandidate && handoff.remainingWindowMs(offeredCandidate) <= 0) {
           candidate = null; handoff.clear(); continuity = "new_recording";
           if (budget.take(getPolicy().recording.limits.maxAttempts)) {
             startup = false; queueMicrotask(reconcile); return;
           }
         }
-        if (valid()) { exhausted = true; publish({ status: "unavailable", reason: "identity_unavailable", reference: null }); }
+        if (valid()) {
+          candidate = null; cancel(); invalidateHandoff(); exhausted = true;
+          publish({ status: "unavailable", reason: "identity_unavailable", reference: null, snapshotReceived: false });
+        }
         return;
       }
       identityReady = true;
@@ -227,11 +253,18 @@ export function createReplayRootRuntime({
       if (!await ready(controller.signal) || !valid()) return;
       const loaded = await loadPipeline();
       if (!valid()) return;
+      if (offeredCandidate && handoff.remainingWindowMs(offeredCandidate) <= 0) {
+        candidate = null; handoff.clear(); continuity = "new_recording";
+        if (!budget.take(getPolicy().recording.limits.maxAttempts)) {
+          exhausted = true; publish({ status: "unavailable", reason: "attempts_exhausted", continuity }); return;
+        }
+      }
       fingerprint = replayContextFingerprint(getPolicy(), lifecycle);
       if (!pipeline) {
         pipeline = loaded.createReplayRecordingPipeline({ ...pipelineOptions, fetch: fetchImpl, getPolicy, subscribePolicy, consent, sampler, getPathname,
           getDocumentRelease: () => release, wallNow: now, monotonicNow, recoveryBudget: budget, managePageHide: false,
-          getCaptureAllowed: () => allowed() && identityReady && monotonicNow() < durationDeadline && monotonicNow() < inactivityDeadline,
+          getCaptureAllowed: () => allowed() && identityReady && monotonicNow() < durationDeadline && monotonicNow() < inactivityDeadline &&
+            (!resumeCandidate || handoff.remainingWindowMs(resumeCandidate) > 0),
           beforeRegistration: (intent, signal) => own(replayIntentLockName(intent.idempotencyKey), signal),
           acquireOwnership: (intent, id, signal) => own(replayRecordingLockName(id), signal).then((held) => {
             if (held) { const key = replayIntentLockName(intent.idempotencyKey); leases.get(key)?.release(); leases.delete(key); }
@@ -245,13 +278,33 @@ export function createReplayRootRuntime({
         });
         unsubscribePipeline = pipeline.subscribe(update);
       }
+      if (pausedIdentity) {
+        const retained = pausedIdentity;
+        const lease = leases.get(replayRecordingLockName(retained.checkpoint.recordingId));
+        const eligible = now() < retained.deadline && monotonicNow() < retained.monotonicDeadline && monotonicNow() < durationDeadline && monotonicNow() < inactivityDeadline &&
+          replayContextFingerprint(retained.policy, lifecycle) === fingerprint && (!hasLocks() || lease?.isHeld());
+        pausedIdentity = null;
+        if (eligible) {
+          resuming = true;
+          continuity = "resuming";
+          const resumed = await pipeline.resumeFromCheckpoint(retained.checkpoint, { signal: controller.signal, deadline: retained.deadline, revalidate: true });
+          if (run === generation) resuming = false;
+          if (resumed && valid()) { update(); return; }
+        }
+        if (!valid()) return;
+        pipeline.stop(); exhausted = false; continuity = "new_recording";
+        if (!budget.take(getPolicy().recording.limits.maxAttempts)) {
+          exhausted = true; publish({ status: "unavailable", reason: "attempts_exhausted", reference: null, continuity }); return;
+        }
+      }
       durationDeadline = monotonicNow() + lifecycle.maxDurationMs;
       inactivityDeadline = monotonicNow() + lifecycle.inactivityMs;
       if (candidate) {
         const offered = candidate; candidate = null;
         const context = handoffContext();
         const key = replayRecordingLockName(offered.prepared.upload.recordingId);
-        const lease = context && hasLocks() ? await acquireReplayOwnership(key, { locks, timeoutMs: Math.max(1, Math.min(1_000, offered.expiresAt - now())) }) : null;
+        const remaining = handoff.remainingWindowMs(offered);
+        const lease = context && remaining > 0 && hasLocks() ? await acquireReplayOwnership(key, { locks, timeoutMs: Math.max(1, Math.min(1_000, remaining)) }) : null;
         let adopted = false;
         if (!valid()) { lease?.release(); return; }
         const consumed = lease && context ? await handoff.consume(offered, context, lease, controller.signal) : null;
@@ -262,8 +315,9 @@ export function createReplayRootRuntime({
           durationDeadline = monotonicNow() + consumed.remaining.remainingDurationMs;
           inactivityDeadline = monotonicNow() + consumed.remaining.remainingInactivityMs;
           resuming = true;
-          const resumed = await pipeline.resumeFromCheckpoint(offered.prepared.upload, { signal: controller.signal, deadline: offered.expiresAt });
-          resuming = false;
+          resumeCandidate = offered;
+          const resumed = await pipeline.resumeFromCheckpoint(offered.prepared.upload, { signal: controller.signal, deadline: now() + handoff.remainingWindowMs(offered) });
+          if (run === generation) resuming = false;
           if (resumed && valid()) { update(); return; }
         }
         // An abort can settle the public resume result before fetch itself settles.
@@ -272,6 +326,7 @@ export function createReplayRootRuntime({
         handoff.clear();
         if (!valid()) return;
         pipeline.stop(); exhausted = false;
+        resumeCandidate = null;
         continuity = "new_recording";
         if (!budget.take(getPolicy().recording.limits.maxAttempts)) { exhausted = true; publish({ status: "unavailable", reason: "attempts_exhausted", continuity }); return; }
       }
@@ -281,18 +336,41 @@ export function createReplayRootRuntime({
       pipeline.start({ explicit: false });
       update();
     } catch {
-      if (valid()) { exhausted = true; pipeline?.stop(); publish({ status: "unavailable", reason: "runtime_unavailable", reference: null }); }
+      if (valid()) {
+        candidate = null; cancel(); invalidateHandoff(); exhausted = true;
+        publish({ status: "unavailable", reason: "runtime_unavailable", reference: null, snapshotReceived: false });
+      }
     } finally {
       if (run === generation) { startup = false; pending = null; }
     }
   }
   function reconcile() {
     if (!attached || suspended) return;
+    const policy = getPolicy();
+    if (policy.status === "active" && !policy.capture.enabled) deliberatelyDisabled = true;
+    else if (deliberatelyDisabled && policy.status === "active" && policy.capture.enabled) {
+      deliberatelyDisabled = false;
+      cancel(); invalidateHandoff(); fingerprint = "";
+      exhausted = false;
+      budget.reset();
+    }
     if (!releaseOwner && owners.getOwner() === null) {
       // acquire emits synchronously; defer its observer to prevent recursive acquisition.
       releaseOwner = owners.acquire("root", () => { releaseOwner = null; cancel(); invalidateHandoff(); publish({ status: "disabled", reason: "harness_owner", reference: null }); });
     }
     const gate = permission();
+    if (pausedIdentity) {
+      const retainedGate = evaluateCapturePermission({ policy: pausedIdentity.policy, consent: consent.getSnapshot(), pathname: getPathname(), sampled: () => true });
+      const policyPending = policy.status === "disabled" && policy.reason === "unavailable";
+      if (!requested || !releaseOwner || !retainedGate.allowed || now() >= pausedIdentity.deadline || monotonicNow() >= pausedIdentity.monotonicDeadline ||
+          monotonicNow() >= durationDeadline || monotonicNow() >= inactivityDeadline ||
+          (!policyPending && (!gate.allowed || replayContextFingerprint(policy, lifecycle) !== replayContextFingerprint(pausedIdentity.policy, lifecycle)))) {
+        cancel(); invalidateHandoff(); continuity = "new_recording";
+      } else if (revalidatingIdentity || policyPending) {
+        publish({ status: "waiting", reason: revalidatingIdentity ? "identity_pending" : "policy_pending", reference: null, snapshotReceived: false });
+        return;
+      }
+    }
     if (!allowed()) {
       if (pipeline?.getState().capture.status === "capturing" || startup) cancel();
       if (consent.getSnapshot() === "withdrawn") { candidate = null; invalidateHandoff(); }
@@ -325,9 +403,9 @@ export function createReplayRootRuntime({
     if (idle) { idle = false; reconcile(); }
   }
   function onTick() {
-    if (candidate && now() >= candidate.expiresAt) { candidate = null; handoff.clear(); continuity = "new_recording"; }
+    if (candidate && handoff.remainingWindowMs(candidate) <= 0) { candidate = null; handoff.clear(); continuity = "new_recording"; }
     if (suspended || !attached) return;
-    if (pipeline && (pipeline.getState().capture.status === "capturing" || pipeline.getRecordingReference() !== null)) {
+    if (!revalidatingIdentity && !pausedIdentity && pipeline && (pipeline.getState().capture.status === "capturing" || pipeline.getRecordingReference() !== null)) {
       if (monotonicNow() >= inactivityDeadline) { idle = true; pipeline.stopCapture(); if (permission().allowed) pipeline.flushOnPageHide(); cancel(); invalidateHandoff(); publish({ status: "waiting", reason: "inactive", reference: null }); }
       else if (monotonicNow() >= durationDeadline) { invalidateHandoff(); durationDeadline = monotonicNow() + lifecycle.maxDurationMs; pipeline.rotate(); update(); }
       else update();
@@ -374,18 +452,39 @@ export function createReplayRootRuntime({
       for (const name of ["pointerdown", "keydown", "scroll"] as const) window.removeEventListener(name, onActivity);
     });
   }
+  function beginIdentityRevalidation() {
+    if (revalidatingIdentity) return;
+    revalidatingIdentity = true;
+    identityKey = undefined;
+    cancel(false);
+    const checkpoint = pipeline?.quiesceForHandoff();
+    const lease = checkpoint && leases.get(replayRecordingLockName(checkpoint.recordingId));
+    if (checkpoint && permission().allowed && (!hasLocks() || lease?.isHeld())) {
+      pausedIdentity = { checkpoint, policy: structuredClone(getPolicy()), deadline: now() + 12_000, monotonicDeadline: monotonicNow() + 12_000 };
+    } else if (pipeline) {
+      pipeline.stop(); invalidateHandoff(); continuity = "new_recording";
+    }
+    publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false });
+  }
   return {
     attach() { attached++; if (attached === 1) install(); reconcile(); return () => { attached = Math.max(0, attached - 1); if (!attached) { cancel(); if (!(suspended && continuity === "handoff")) invalidateHandoff(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); releaseOwner?.(); releaseOwner = null; } }; },
     setIdentity(key: string | null | undefined) {
+      if (key === undefined) { beginIdentityRevalidation(); return; }
       if (identityKey === key) return;
-      if (previousIdentity !== undefined && key !== undefined && previousIdentity !== key) { identity.requireReset(); candidate = null; invalidateHandoff(); }
-      if (key !== undefined) previousIdentity = key;
-      identityKey = key; cancel(); reconcile();
+      const changed = previousIdentity !== undefined && previousIdentity !== key;
+      if (changed) { identity.requireReset(); candidate = null; cancel(); invalidateHandoff(); continuity = "new_recording"; }
+      previousIdentity = key;
+      identityKey = key;
+      if (!revalidatingIdentity) cancel();
+      revalidatingIdentity = false;
+      reconcile();
     },
-    beginIdentityChange() { identityKey = undefined; candidate = null; cancel(); invalidateHandoff(); publish({ status: "waiting", reason: "identity_pending", reference: null }); },
+    beginIdentityRevalidation,
+    failIdentityRevalidation() { revalidatingIdentity = false; identityKey = undefined; candidate = null; cancel(); invalidateHandoff(); exhausted = true; publish({ status: "unavailable", reason: "identity_unavailable", reference: null, snapshotReceived: false }); },
+    beginIdentityChange() { revalidatingIdentity = false; identity.requireReset(); identityKey = undefined; candidate = null; cancel(); invalidateHandoff(); publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false }); },
     start() { requested = true; idle = false; reconcile(); },
     stop() { requested = false; candidate = null; cancel(); invalidateHandoff(); publish({ status: "disabled", reason: "stopped", reference: null, snapshotReceived: false }); },
-    restart() { exhausted = false; budget.reset(); requested = true; idle = false; cancel(); invalidateHandoff(); reconcile(); },
+    restart() { cancel(); invalidateHandoff(); exhausted = false; budget.reset(); requested = true; idle = false; reconcile(); },
     getSnapshot: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     getDiagnostics: () => diagnostics,

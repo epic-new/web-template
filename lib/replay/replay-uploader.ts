@@ -293,7 +293,13 @@ export function createReplayUploader({
 
   function recordHistory(rec: Recording) {
     if (!rec.reference) return;
-    if (!historyRecordings.includes(rec)) historyRecordings = [rec, ...historyRecordings].slice(0, HISTORY_LIMIT);
+    if (!historyRecordings.includes(rec)) {
+      // Same-document revalidation replaces the local producer, not the durable
+      // recording. Keep one row with its cumulative receipts; saved references
+      // remain immutable values held by their original consumers.
+      const id = rec.reference.recordingId;
+      historyRecordings = [rec, ...historyRecordings.filter((entry) => entry.reference?.recordingId !== id)].slice(0, HISTORY_LIMIT);
+    }
     history = historyRecordings.map(
       (entry): ReplayRecordingHistoryEntry => ({
         reference: entry.reference!,
@@ -498,6 +504,22 @@ export function createReplayUploader({
     return envelopeBytes(rec) + bytes <= rec.limits.maxBatchBytes;
   }
 
+  /** The first batch of every producer, including a successor, opens atomically. */
+  function checkOpeningPair(rec: Recording): boolean {
+    if (rec.snapshotReceived || rec.inflight || rec.queue.length < 2) return true;
+    const [meta, snapshot] = rec.queue;
+    if (meta!.event.type !== 4 || snapshot!.event.type !== 2) {
+      end(rec, "invalid_request", "unavailable", false);
+      return false;
+    }
+    if (rec.limits.maxBatchEvents < 2 ||
+      envelopeBytes(rec) + meta!.bytes + 1 + snapshot!.bytes > rec.limits.maxBatchBytes) {
+      end(rec, "snapshot_too_large", "unavailable", false);
+      return false;
+    }
+    return true;
+  }
+
   function elapsed(since: { mono: number; wall: number }) {
     // Uncertain elapsed time counts against retention: a suspension or a
     // forward wall-clock jump discards, a backward jump never extends.
@@ -659,12 +681,15 @@ export function createReplayUploader({
       (rec.queue.length > 0 && monotonicNow() - rec.lastFlushAt >= rec.limits.flushIntervalMs);
     if (!due) return;
     if (rec.queue.length === 0 && !rec.finalRequested) return;
-    rec.inflight = freeze(rec);
+    const batch = freeze(rec);
+    if (!batch) return;
+    rec.inflight = batch;
     runOperation(rec, () => upload(rec));
   }
 
   /** Freezes the next batch: id, sequence, events and final never change after this. */
-  function freeze(rec: Recording): FrozenBatch {
+  function freeze(rec: Recording): FrozenBatch | null {
+    if (!checkOpeningPair(rec) || (!rec.snapshotReceived && rec.queue.length < 2)) return null;
     const budget = rec.limits.maxBatchBytes - envelopeBytes(rec);
     const taken: Queued[] = [];
     let bytes = 0;
@@ -819,7 +844,7 @@ export function createReplayUploader({
     // An event too large for the recording's own limits is never truncated.
     if (rec.queue.some((item) => !fitsAlone(rec, item.bytes))) {
       end(rec, "snapshot_too_large", "unavailable", false);
-    } else if (checkRetention(rec)) {
+    } else if (checkOpeningPair(rec) && checkRetention(rec)) {
       ensureTicker();
       pump(rec);
     }
@@ -963,7 +988,7 @@ export function createReplayUploader({
     rec.queue.push({ event: JSON.parse(serialized) as eventWithTime, bytes, mono: monotonicNow(), wall: wallNow() });
     rec.queueBytes += bytes;
     ensureTicker();
-    if (checkRetention(rec)) pump(rec);
+    if (checkOpeningPair(rec) && checkRetention(rec)) pump(rec);
     notify();
   }
 
@@ -1062,22 +1087,35 @@ export function createReplayUploader({
       return true;
     },
 
-    /** Only the root's consumed, exclusively owned handoff may call this path. */
+    /** A consumed handoff or this producer's quiesced frontier, under continued ownership. */
     async resumeFromCheckpoint(
       input: ReplayUploadCheckpoint,
       boundary = 1,
-      options: { signal?: AbortSignal; deadline?: number } = {},
+      options: { signal?: AbortSignal; deadline?: number; revalidate?: boolean } = {},
     ): Promise<boolean> {
       const parsed = replayUploadCheckpointSchema.safeParse(input);
-      if (!parsed.success || options.signal?.aborted || liveRecordings().length > 0 || requestOwner || pendingContinuations > 0 ||
+      if (!parsed.success || options.signal?.aborted || requestOwner || pendingContinuations > 0 ||
         boundary <= lastBoundary || (options.deadline !== undefined && options.deadline <= wallNow())) return false;
       const saved = parsed.data;
       if (saved.registration.configVersion !== getConfigVersion() || saved.registration.release !== documentRelease(getDocumentRelease())) return false;
+      const predecessor = options.revalidate ? current : null;
+      if (options.revalidate) {
+        const ownedFrontier = handoffQuiesced ? safeCheckpoint() : null;
+        if (!predecessor || !ownedFrontier || JSON.stringify(ownedFrontier) !== JSON.stringify(saved)) return false;
+      } else if (liveRecordings().length > 0) return false;
+      const rec = startRecording(boundary, { timestamp: saved.startedAt });
+      if (rec.phase === "ended") return false;
+      if (predecessor) {
+        // No events, requests, timers or receipt continuations remain. Transfer
+        // the lease to the successor without invoking the release callback.
+        predecessor.phase = "ended";
+        predecessor.token = null;
+        predecessor.ownershipReleased = true;
+        rec.intentOwned = predecessor.intentOwned;
+      }
       halted = false;
       handoffQuiesced = false;
       handedOff = false;
-      const rec = startRecording(boundary, { timestamp: saved.startedAt });
-      if (rec.phase === "ended") return false;
       rec.registration = Object.freeze(saved.registration);
       rec.resumeCheckpoint = saved;
       // The caller already holds this recording's lease during resume identity
@@ -1142,6 +1180,10 @@ export function createReplayUploader({
         if (!checkRetention(rec)) return;
         rec.finalRequested = true;
         const batch = freeze(rec);
+        if (!batch) {
+          notify();
+          return;
+        }
         if (rec.queue.length > 0 || jsonByteLength(batch.body) > KEEPALIVE_MAX_BYTES) {
           // Too large for keepalive: put the events back unchanged.
           rec.queue = [

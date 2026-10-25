@@ -115,19 +115,33 @@ const centralRegistrationSchema = replayRegistrationRequestSchema.omit({ viewpor
 export function createSyntheticEpi210({
   now = () => Date.now(),
   randomUUID = () => crypto.randomUUID(),
-}: { now?: () => number; randomUUID?: () => string } = {}) {
+  fingerprint = (value: unknown) => JSON.stringify(value),
+  maxRecordings = 100,
+  maxReceipts = 2_000,
+}: {
+  now?: () => number;
+  randomUUID?: () => string;
+  /** The loopback relay uses SHA-256 so it never retains raw event payloads. */
+  fingerprint?: (value: unknown) => string;
+  maxRecordings?: number;
+  maxReceipts?: number;
+} = {}) {
   let mode: SyntheticFixtureMode = "accept";
   let captureDisabled = false;
   const byKey = new Map<string, SyntheticRecording>();
   const byId = new Map<string, SyntheticRecording>();
   const tokens = new Map<string, { recordingId: string; subjectId: string; expiresAt: number }>();
   let tokenCounter = 0;
+  let receiptCount = 0;
   /** Provider (Cloud) append calls: empty finalization never makes one. */
   const providerAppends: { recordingId: string; batchId: string; sequence: number }[] = [];
   /** Forced answers for the next central batch calls, consumed in order. */
   const scripted: SyntheticAnswer[] = [];
 
   function issueToken(recording: SyntheticRecording) {
+    for (const [key, token] of tokens) if (token.expiresAt <= now()) tokens.delete(key);
+    // Fixture capabilities are bounded even when a client repeatedly renews.
+    while (tokens.size >= 1_000) tokens.delete(tokens.keys().next().value!);
     const token = `cap_${++tokenCounter}_${recording.recordingId.slice(0, 8)}`;
     const expiresAt = now() + SYNTHETIC_CAPABILITY_TTL_MS;
     tokens.set(token, { recordingId: recording.recordingId, subjectId: recording.subjectId, expiresAt });
@@ -156,13 +170,14 @@ export function createSyntheticEpi210({
     const registration = parsed.data;
     if (captureDisabled) return error("capture_disabled");
     // Central hashes the complete frozen central payload.
-    const hash = JSON.stringify(payload);
+    const hash = fingerprint(payload);
     const existing = byKey.get(registration.idempotencyKey);
     if (existing) {
       if (existing.hash !== hash) return error("idempotency_conflict");
       if (existing.status !== "open") return error("recording_closed");
       return { status: 200, body: capability(existing) };
     }
+    if (byId.size >= maxRecordings) return error("unavailable");
     const recording: SyntheticRecording = {
       recordingId: randomUUID(),
       cloudId: randomUUID(),
@@ -196,9 +211,17 @@ export function createSyntheticEpi210({
   }
 
   function batch(recordingId: string, payload: unknown): SyntheticAnswer {
-    if (!isRecord(payload) || typeof payload.subjectId !== "string" || typeof payload.recordingToken !== "string" || typeof payload.batchId !== "string" || typeof payload.sequence !== "number" || !Array.isArray(payload.events) || typeof payload.final !== "boolean") {
+    const parsed = replayBatchRequestSchema.extend({ subjectId: z.string().min(1).max(200) }).strict().safeParse(payload);
+    if (!parsed.success) {
       return error("invalid_request");
     }
+    payload = parsed.data;
+    const request = parsed.data;
+    // Keep the validated object narrowed below, including its ownership field.
+    return append(recordingId, request);
+  }
+
+  function append(recordingId: string, payload: z.infer<typeof replayBatchRequestSchema> & { subjectId: string }): SyntheticAnswer {
     const recording = byId.get(recordingId);
     if (!recording) return error("recording_not_found");
     const token = tokens.get(payload.recordingToken);
@@ -208,7 +231,7 @@ export function createSyntheticEpi210({
 
     // Receipts are checked first: an exact retry recovers its original answer
     // even after the recording closed.
-    const hash = JSON.stringify([payload.sequence, payload.events, payload.final]);
+    const hash = fingerprint([payload.sequence, payload.events, payload.final]);
     const receipt = recording.receipts.get(payload.batchId);
     if (receipt) {
       if (receipt.hash !== hash) return error("idempotency_conflict");
@@ -223,6 +246,7 @@ export function createSyntheticEpi210({
       return error("payload_too_large");
     }
     if (payload.events.length === 0 && !payload.final) return error("invalid_request");
+    if (receiptCount >= maxReceipts) return error("unavailable");
 
     const forced = scripted.shift();
     if (forced) return forced;
@@ -232,6 +256,7 @@ export function createSyntheticEpi210({
       // Metadata-only finalization: zero provider appends, availability unchanged.
       const ack = acknowledge(recording, payload.batchId, payload.sequence, "finalized");
       recording.receipts.set(payload.batchId, { hash, ack });
+      receiptCount++;
       recording.status = "closed";
       return { status: 200, body: ack };
     }
@@ -239,6 +264,7 @@ export function createSyntheticEpi210({
     if (mode === "delivery_uncertain_next") {
       mode = "accept";
       recording.receipts.set(payload.batchId, { hash, ack: null });
+      receiptCount++;
       recording.status = "quarantined";
       return error("delivery_uncertain");
     }
@@ -247,6 +273,7 @@ export function createSyntheticEpi210({
     recording.availability = "events_received";
     const ack = acknowledge(recording, payload.batchId, payload.sequence, "accepted");
     recording.receipts.set(payload.batchId, { hash, ack });
+    receiptCount++;
     if (payload.final) recording.status = "closed";
     if (mode === "expire_capability" && !recording.expiredOnce) {
       recording.expiredOnce = true;
@@ -295,7 +322,20 @@ export function createSyntheticEpi210({
     },
     /** Answers the next central batch calls (after receipt/order checks) with these. */
     scriptBatchAnswers(...answers: SyntheticAnswer[]) {
-      scripted.push(...answers);
+      scripted.push(...answers.slice(0, 100 - scripted.length));
+    },
+    /** Strictly synthetic fault controls, never application endpoints. */
+    advanceCursor(recordingId: string) {
+      const recording = byId.get(recordingId);
+      if (!recording || recording.status !== "open") return false;
+      recording.nextSequence++;
+      return true;
+    },
+    closeRecording(recordingId: string) {
+      const recording = byId.get(recordingId);
+      if (!recording) return false;
+      recording.status = "closed";
+      return true;
     },
     /** Expires every capability issued so far. */
     expireCapabilities() {

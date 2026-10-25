@@ -78,12 +78,13 @@ function setup() {
   const ledger = new Ledger();
   const local = storage();
   const create = (target = local, overrides: Partial<Parameters<typeof createReplayHandoff>[0]> = {}) => createReplayHandoff({
-    storage: target, ledger, now: () => wall, monotonicNow: () => mono, randomUUID: () => uuid(generation++), ...overrides,
+    storage: target, ledger, now: () => wall, monotonicNow: () => mono, epochNow: () => T0 + mono, randomUUID: () => uuid(generation++), ...overrides,
   });
   return {
     ledger, local, create,
     advance: (ms: number) => { wall += ms; mono += ms; },
     jump: (ms: number) => { wall += ms; },
+    jumpMonotonic: (ms: number) => { mono += ms; },
   };
 }
 
@@ -200,6 +201,98 @@ describe("clean reload handoff metadata", () => {
     expect(s.create().peek(reload)).toBeNull();
     // No cleanup/finalization network operation exists in this module.
     expect(s.ledger.rows.get(prepared!.generation)?.consumed).toBe(false);
+  });
+
+  it("rejects an expired cross-document handoff when the wall clock moves back", async () => {
+    const s = setup();
+    const predecessor = s.create();
+    const prepared = await predecessor.prepare(checkpoint(), context());
+    expect(predecessor.offer(prepared!, checkpoint(), context(), lease())).toBe(true);
+    s.advance(20_000);
+    s.jump(-10_000);
+    // Only ten wall-clock seconds passed, but the 15-second window is spent.
+    expect(s.create().peek(reload)).toBeNull();
+    expect(s.local.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each([
+    { wallAdjustment: -500, elapsed: 1_000 },
+    { wallAdjustment: 500, elapsed: 1_500 },
+  ])("subtracts the larger valid elapsed delta across documents: %j", async ({ wallAdjustment, elapsed }) => {
+    const s = setup();
+    const predecessor = s.create();
+    const prepared = await predecessor.prepare(checkpoint(), context());
+    expect(predecessor.offer(prepared!, checkpoint(), context(), lease())).toBe(true);
+    s.advance(1_000);
+    s.jump(wallAdjustment);
+    // A successor has a new local time origin. Only epoch-relative time is
+    // comparable with the predecessor; its local performance.now can be zero.
+    const successor = s.create(s.local, { monotonicNow: () => 0 });
+    const candidate = successor.peek(reload)!;
+    expect(successor.remainingWindowMs(candidate)).toBe(15_000 - elapsed);
+    const consumed = await successor.consume(candidate, context(), lease());
+    expect(consumed?.remaining).toMatchObject({
+      remainingDurationMs: 120_000 - elapsed,
+      remainingInactivityMs: 60_000 - elapsed,
+      recoveryDebt: 2,
+    });
+    s.advance(15_000 - elapsed);
+    expect(successor.remainingWindowMs(candidate)).toBe(0);
+  });
+
+  it.each([NaN, Infinity, -1, 0, Number.MAX_SAFE_INTEGER + 1])("refuses unavailable or invalid epoch-relative clocks: %s", async (epochAt) => {
+    const s = setup();
+    expect(await s.create(s.local, { epochNow: () => epochAt }).prepare(checkpoint(), context())).toBeNull();
+    const predecessor = s.create();
+    const prepared = await predecessor.prepare(checkpoint(), context());
+    expect(predecessor.offer(prepared!, checkpoint(), context(), lease())).toBe(true);
+    expect(s.create(s.local, { epochNow: () => epochAt }).peek(reload)).toBeNull();
+  });
+
+  it.each(["preparedEpochMs", "offeredEpochMs"] as const)("rejects metadata missing the %s clock proof", async (field) => {
+    const s = setup();
+    const predecessor = s.create();
+    const prepared = await predecessor.prepare(checkpoint(), context());
+    expect(predecessor.offer(prepared!, checkpoint(), context(), lease())).toBe(true);
+    const candidate = JSON.parse(s.local.getItem(REPLAY_HANDOFF_STORAGE_KEY)!);
+    if (field === "preparedEpochMs") delete candidate.prepared.preparedEpochMs;
+    else delete candidate.offeredEpochMs;
+    s.local.setItem(REPLAY_HANDOFF_STORAGE_KEY, JSON.stringify(candidate));
+    expect(s.create().peek(reload)).toBeNull();
+    expect(s.local.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
+  });
+
+  it.each([-1, 1_001])("rejects backward or inconsistent cross-document monotonic progression: %s", async (adjustment) => {
+    const s = setup();
+    const predecessor = s.create();
+    const prepared = await predecessor.prepare(checkpoint(), context());
+    expect(predecessor.offer(prepared!, checkpoint(), context(), lease())).toBe(true);
+    s.jumpMonotonic(adjustment);
+    expect(s.create().peek(reload)).toBeNull();
+  });
+
+  it("spends a generation when its consume transaction outlives the monotonic window", async () => {
+    const s = setup();
+    const predecessor = s.create();
+    const prepared = await predecessor.prepare(checkpoint(), context());
+    expect(predecessor.offer(prepared!, checkpoint(), context(), lease())).toBe(true);
+    const originalConsume = s.ledger.consume.bind(s.ledger);
+    let finish!: () => void;
+    const delayed = new Promise<void>((resolve) => { finish = resolve; });
+    s.ledger.consume = async (...args) => {
+      const result = await originalConsume(...args);
+      await delayed;
+      return result;
+    };
+    const successor = s.create();
+    const candidate = successor.peek(reload)!;
+    const result = successor.consume(candidate, context(), lease());
+    s.advance(20_000);
+    s.jump(-10_000);
+    finish();
+    expect(await result).toBeNull();
+    expect(s.ledger.rows.get(prepared!.generation)?.consumed).toBe(true);
+    expect(successor.remainingWindowMs(candidate)).toBe(0);
   });
 
   it("rejects evicted generations, corrupted metadata and context changes before network", async () => {

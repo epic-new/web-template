@@ -42,6 +42,7 @@ let gatedAt: number | null = null;
 let current: PublicReplayConfig = unavailable();
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 const listeners = new Set<Listener>();
+const gateListeners = new Set<() => void>();
 
 function effective(): PublicReplayConfig {
   if (!applied) return current.reason === "unavailable" ? current : unavailable();
@@ -117,6 +118,11 @@ export const replayLifecycle = {
    * on resume or any transition whose elapsed time cannot be trusted.
    */
   gate(): void {
+    // The host closes event admission before policy subscribers observe the
+    // temporary gate, preserving only an eligible immutable revalidation frontier.
+    for (const listener of [...gateListeners]) {
+      try { listener(); } catch { /* Replay must still fail closed if a host observer fails. */ }
+    }
     gatedAt = monotonicNow();
     const changed = evaluate();
     scheduleExpiry();
@@ -128,6 +134,11 @@ export const replayLifecycle = {
     return () => {
       listeners.delete(listener);
     };
+  },
+
+  subscribeGate(listener: () => void): () => void {
+    gateListeners.add(listener);
+    return () => { gateListeners.delete(listener); };
   },
 
   // Checks expiry synchronously, so a suspended timer cannot keep capture on.
@@ -148,5 +159,6 @@ export const replayLifecycle = {
     gatedAt = null;
     current = unavailable();
     listeners.clear();
+    gateListeners.clear();
   },
 };

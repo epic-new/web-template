@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { eventWithTime } from "@rrweb/types";
 
 import { REPLAY_RECORDING_LIMITS } from "../replay-config.contract";
-import type { ReplayUploadErrorCode } from "../replay-upload-contract";
+import { replayBatchRequestSchema, type ReplayUploadErrorCode } from "../replay-upload-contract";
 import { createReplayUploader, REPLAY_ERROR_ACTIONS, REPLAY_UPLOAD_REQUEST_TIMEOUT_MS, type ReplayUploaderOptions } from "../replay-uploader";
 import { replayUploadCheckpointSchema } from "../replay-upload-checkpoint";
 import errors from "./fixtures/publishing-errors.v1.json";
@@ -122,7 +122,8 @@ describe("createReplayUploader", () => {
     const { uploader, browser, batches } = setup();
 
     uploader.push(meta(), 1);
-    for (let i = 0; i < 1_199; i++) uploader.push(incremental(T0 + i + 1), 1);
+    uploader.push(full(), 1);
+    for (let i = 0; i < 1_198; i++) uploader.push(incremental(T0 + i + 2), 1);
     await flush(0);
     await flush(5_000);
 
@@ -398,6 +399,76 @@ describe("createReplayUploader", () => {
     expect(tiny.batches()).toHaveLength(0);
   });
 
+  it.each(["local", "negotiated"] as const)("rejects an opening pair that exceeds the %s whole-request budget even when each event fits", async (limitSource) => {
+    const fixture = setup({
+      mode: "tiny_batch",
+      ...(limitSource === "local" ? { getLimits: () => ({ ...REPLAY_RECORDING_LIMITS, maxBatchBytes: 2_048 }) } : {}),
+    });
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(T0 + 1, 1_350), 1);
+    await flush(5_000);
+    expect(fixture.uploader.getState()).toMatchObject({
+      status: "unavailable", reason: "snapshot_too_large", current: null, bufferedEvents: 0, bufferedBytes: 0,
+    });
+    expect(fixture.batches()).toHaveLength(0);
+    fixture.uploader.dispose();
+  });
+
+  it("requires room for both opening events in the negotiated event-count limit", async () => {
+    const fixture = setup({ fetch: (async (url, init) => {
+      const response = await relay(url, init);
+      if (!String(url).endsWith("/recordings")) return response;
+      const body = await response.json();
+      return Response.json({ ...body, limits: { ...body.limits, maxBatchEvents: 1 } }, { status: response.status });
+    }) as typeof fetch });
+    const relay = fixture.browser.fetch;
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(), 1);
+    await flush(5_000);
+    expect(fixture.uploader.getState()).toMatchObject({ reason: "snapshot_too_large", bufferedEvents: 0 });
+    expect(fixture.batches()).toHaveLength(0);
+    fixture.uploader.dispose();
+  });
+
+  it("never uploads a Meta-only opening on a flush tick or pagehide", async () => {
+    const fixture = setup();
+    fixture.uploader.push(meta(), 1);
+    await flush(5_000);
+    fixture.uploader.flushOnPageHide();
+    await flush(0);
+    expect(fixture.batches()).toHaveLength(0);
+    fixture.uploader.dispose();
+  });
+
+  it("keeps a near-limit opening pair together with immutable receipt recovery", async () => {
+    let lost = false;
+    const sent: unknown[] = [];
+    const fixture = setup({ mode: "tiny_batch", fetch: (async (url, init) => {
+      if (String(url).endsWith("/batches")) sent.push(JSON.parse(String(init!.body)));
+      const response = await relay(url, init);
+      if (String(url).endsWith("/batches") && !lost) {
+        lost = true;
+        throw new TypeError("accepted receipt lost");
+      }
+      return response;
+    }) as typeof fetch });
+    const relay = fixture.browser.fetch;
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(T0 + 1, 1_300), 1);
+    fixture.uploader.push(incremental(T0 + 2), 1);
+    await flush(500);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
+    const batch = replayBatchRequestSchema.parse(sent[0]);
+    expect(batch.sequence).toBe(0);
+    expect(batch.events).toEqual([meta(), full(T0 + 1, 1_300)]);
+    // The BFF adds its server-owned subject to this complete JSON envelope.
+    expect(new TextEncoder().encode(JSON.stringify({ ...batch, subjectId: `sub_${"x".repeat(43)}` })).byteLength).toBeLessThanOrEqual(2_048);
+    expect(fixture.uploader.getProgress()).toMatchObject({ snapshotReceived: true, acceptedBatches: 1 });
+    expect(fixture.uploader.getState().bufferedEvents).toBe(1);
+    fixture.uploader.dispose();
+  });
+
   it("quarantines on delivery_uncertain: no further request for that recording", async () => {
     const { uploader, fixture, browser, lost } = setup();
     uploader.push(meta(), 1);
@@ -563,6 +634,123 @@ describe("createReplayUploader", () => {
     expect(successor.uploader.getProgress()).toMatchObject({ continuity: "resumed", snapshotReceived: true });
     await flush(1); // The receipt wake task must settle before a new clean frontier exists.
     expect(successor.uploader.getCheckpoint()).toMatchObject({ nextSequence: 2, startedAt: T0 });
+    successor.uploader.dispose();
+    original.uploader.dispose();
+  });
+
+  it("revalidates only its own quiesced frontier without releasing cooperative ownership", async () => {
+    const ended = vi.fn();
+    const fixture = setup({ onRecordingEnded: ended });
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(), 1);
+    await flush(5_000);
+    const initial = fixture.uploader.getRecordingReference()!;
+    await flush(1);
+    const unpaused = fixture.uploader.getCheckpoint()!;
+    expect(unpaused).not.toBeNull();
+    expect(await fixture.uploader.resumeFromCheckpoint(unpaused, 2, { revalidate: true })).toBe(false);
+    const checkpoint = fixture.uploader.quiesceForHandoff()!;
+    const revalidated = fixture.uploader.resumeFromCheckpoint(checkpoint, 2, { revalidate: true });
+    await flush(0);
+    expect(await revalidated).toBe(true);
+    expect(ended).not.toHaveBeenCalled();
+    expect(fixture.uploader.getRecordingReference()).toMatchObject({
+      recordingId: initial.recordingId, startedAt: initial.startedAt, boundary: 2,
+    });
+    expect(fixture.uploader.getProgress()).toMatchObject({ continuity: "resuming", snapshotReceived: false });
+    fixture.uploader.push(meta(Date.now()), 2);
+    fixture.uploader.push(full(Date.now() + 1), 2);
+    await flush(5_000);
+    expect(fixture.fixture.recordings()).toHaveLength(1);
+    expect(fixture.batches()).toEqual([
+      expect.objectContaining({ sequence: 0, firstEventTypes: [4, 2] }),
+      expect.objectContaining({ sequence: 1, firstEventTypes: [4, 2] }),
+    ]);
+    expect(fixture.uploader.getProgress()).toMatchObject({ continuity: "resumed", snapshotReceived: true });
+    expect(fixture.uploader.getState().history).toEqual([
+      expect.objectContaining({
+        reference: { recordingId: initial.recordingId, startedAt: T0, boundary: 2 },
+        acceptedBatches: 2, outcome: "open",
+      }),
+    ]);
+    // Consumers holding the earlier evidence reference retain its local boundary.
+    expect(initial).toEqual({ recordingId: checkpoint.recordingId, startedAt: T0, boundary: 1 });
+    expect(Object.isFrozen(initial)).toBe(true);
+    fixture.uploader.dispose();
+    expect(ended).toHaveBeenCalledTimes(1);
+    expect(ended).toHaveBeenCalledWith(checkpoint.registration, initial.recordingId);
+  });
+
+  it("rejects stale or dirty same-document revalidation without dropping the owned stream", async () => {
+    const fixture = setup();
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(), 1);
+    await flush(5_000);
+    await flush(1);
+    const checkpoint = fixture.uploader.getCheckpoint()!;
+    expect(checkpoint).not.toBeNull();
+    fixture.uploader.push(incremental(Date.now()), 1);
+    expect(fixture.uploader.quiesceForHandoff()).toBeNull();
+    expect(await fixture.uploader.resumeFromCheckpoint(checkpoint, 2, { revalidate: true })).toBe(false);
+    await flush(5_000);
+    expect(fixture.uploader.quiesceForHandoff()!.nextSequence).toBe(2);
+    expect(await fixture.uploader.resumeFromCheckpoint(checkpoint, 2, { revalidate: true })).toBe(false);
+    expect(fixture.uploader.getRecordingReference()?.recordingId).toBe(checkpoint.recordingId);
+    expect(fixture.batches()).toHaveLength(2);
+    fixture.uploader.dispose();
+  });
+
+  it.each([1_300, 1_350])("keeps the resumed opening pair atomic at %i snapshot padding bytes", async (size) => {
+    const original = setup({ mode: "tiny_batch" });
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    original.uploader.commitHandoff();
+    const successor = setup({ fetch: original.browser.fetch });
+    const resumed = successor.uploader.resumeFromCheckpoint(checkpoint);
+    await flush(0);
+    expect(await resumed).toBe(true);
+    successor.uploader.push(meta(Date.now()), 1);
+    successor.uploader.push(full(Date.now() + 1, size), 1);
+    await flush(5_000);
+    if (size === 1_300) {
+      expect(original.batches()).toHaveLength(2);
+      expect(original.batches()[1]).toMatchObject({ sequence: 1, eventCount: 2, firstEventTypes: [4, 2] });
+      expect(successor.uploader.getProgress()).toMatchObject({ continuity: "resumed", snapshotReceived: true });
+    } else {
+      expect(original.batches()).toHaveLength(1);
+      expect(successor.uploader.getState()).toMatchObject({ reason: "snapshot_too_large", current: null, bufferedEvents: 0 });
+      expect(successor.uploader.getProgress().continuity).not.toBe("resumed");
+    }
+    successor.uploader.dispose();
+    original.uploader.dispose();
+  });
+
+  it("does not reopen when registration succeeds but the first resumed append is closed", async () => {
+    const original = setup();
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    original.uploader.commitHandoff();
+    const successor = setup({ fetch: original.browser.fetch });
+    const resumed = successor.uploader.resumeFromCheckpoint(checkpoint);
+    await flush(0);
+    expect(await resumed).toBe(true);
+    expect(original.fixture.closeRecording(checkpoint.recordingId)).toBe(true);
+    successor.uploader.push(meta(Date.now()), 1);
+    successor.uploader.push(full(Date.now() + 1), 1);
+    await flush(5_000);
+    expect(successor.uploader.getState()).toMatchObject({ status: "unavailable", reason: "recording_closed", current: null, bufferedEvents: 0 });
+    expect(successor.uploader.getProgress()).toMatchObject({ continuity: "resuming", snapshotReceived: false });
+    expect(original.batches()).toHaveLength(2);
+    expect(original.batches()[1]).toMatchObject({ sequence: 1, code: "recording_closed" });
+    expect(original.fixture.recordings()).toMatchObject([{ recordingId: checkpoint.recordingId, status: "closed", nextSequence: 1 }]);
+    successor.uploader.push(incremental(Date.now()), 1);
+    await flush(10_000);
+    expect(original.browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(2);
+    expect(original.batches()).toHaveLength(2);
     successor.uploader.dispose();
     original.uploader.dispose();
   });
