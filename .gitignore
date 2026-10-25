@@ -62,6 +62,9 @@ next-env.d.ts
 /db/seed/.credentials/
 
 # database
+/db/*.db
+/db/*.db-shm
+/db/*.db-wal
 /db/databases/*.db
 /db/databases/*.db-shm
 /db/databases/*.db-wal
