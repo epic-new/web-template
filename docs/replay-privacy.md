@@ -3,7 +3,8 @@
 How Epic Replay decides whether to record, and what it hides when it does.
 Everything here runs in the browser before an event enters a buffer. The
 modules live in `lib/replay/`; the development harness at `/styleguide/replay`
-exercises them against synthetic content.
+exercises them against synthetic content. Turning Replay on, or adding it to an
+existing app, is in [replay-adoption.md](./replay-adoption.md).
 
 Adding this code records nothing. No capture session runs outside the harness
 until the root provider mounts one, and even then nothing is recorded until the
