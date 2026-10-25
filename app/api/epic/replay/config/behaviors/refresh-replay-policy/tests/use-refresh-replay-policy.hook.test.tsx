@@ -182,7 +182,7 @@ describe("useRefreshReplayPolicy", () => {
       });
     });
 
-    it("holds capture on resume until a fresh policy arrives", async () => {
+    it.each(["visibility", "focus"] as const)("holds capture on %s until a fresh policy arrives", async (event) => {
       let release!: () => void;
       const { result } = await renderLoaded();
 
@@ -190,8 +190,10 @@ describe("useRefreshReplayPolicy", () => {
         new Promise((resolve) => {
           release = () => resolve(GET());
         });
-      setVisibility("hidden");
-      setVisibility("visible");
+      if (event === "visibility") {
+        setVisibility("hidden");
+        setVisibility("visible");
+      } else window.dispatchEvent(new Event("focus"));
       await settle();
 
       expect(replayLifecycle.getSnapshot()).toMatchObject({

@@ -3,6 +3,7 @@ import type { eventWithTime } from "@rrweb/types";
 import type { PublicReplayConfig } from "./replay-config.contract";
 import type { ReplayEventSink } from "./replay-buffer";
 import { jsonByteLength } from "./replay-redaction";
+import { replayUploadCheckpointSchema, type ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
 import {
   MAX_REPLAY_RELEASE_LENGTH,
   parseReplayUploadError,
@@ -15,11 +16,15 @@ import {
   replayRecordingCapabilitySchema,
   safeReplayPathname,
   type ReplayAvailability,
+  type ReplayFetch,
+  type ReplayBatchAcknowledgment,
   type ReplayBatchRequest,
   type ReplayRegistrationRequest,
   type ReplayUploadErrorCode,
   type ReplayViewport,
 } from "./replay-upload-contract";
+
+export type { ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
 
 /**
  * The browser upload transport for Epic Replay (see docs/replay-privacy.md).
@@ -73,6 +78,14 @@ export interface ReplayUploadState {
   readonly evidence: "unverified";
 }
 
+/** Private runtime diagnostics; not an event-by-event public React context. */
+export interface ReplayUploadProgress {
+  readonly snapshotReceived: boolean;
+  readonly acceptedBatches: number;
+  readonly postOpeningBatches: number;
+  readonly continuity: "fresh" | "resuming" | "resumed" | "handoff";
+}
+
 export type ReplayErrorAction = "stop" | "renew" | "restart" | "retry" | "quarantine";
 
 /** The normative EPI-210 v1 client action for every code. */
@@ -113,7 +126,7 @@ export interface ReplayUploaderOptions {
   getConfigVersion: () => string | null;
   /** The document/build-bound release, never the latest policy's; null when unknown. */
   getDocumentRelease?: () => string | null;
-  fetch?: typeof fetch;
+  fetch?: ReplayFetch;
   monotonicNow?: () => number;
   wallNow?: () => number;
   isOnline?: () => boolean;
@@ -122,6 +135,12 @@ export interface ReplayUploaderOptions {
   randomUUID?: () => string;
   /** A recording ended in a way that permits a fresh one (new boundary). */
   onRecordingLost?: (reason: ReplayUploadReason) => void;
+  /** Cooperative intent ownership, before this recording's first central write. */
+  beforeRegistration?: (registration: ReplayRegistrationRequest, signal: AbortSignal) => Promise<boolean>;
+  /** Hold recording ownership before any events may leave this producer. */
+  acquireOwnership?: (registration: ReplayRegistrationRequest, recordingId: string, signal: AbortSignal) => Promise<boolean>;
+  /** Called only after the retired recording's asynchronous work has settled. */
+  onRecordingEnded?: (registration: ReplayRegistrationRequest, recordingId: string | null) => void;
   baseUrl?: string;
 }
 
@@ -166,6 +185,17 @@ interface Recording {
   outcome: ReplayRecordingHistoryEntry["outcome"];
   reason: ReplayUploadReason;
   offline: boolean;
+  lastAcknowledgment: ReplayBatchAcknowledgment | null;
+  snapshotReceived: boolean;
+  opening: "meta" | "snapshot" | "received" | "invalid";
+  postOpeningBatches: number;
+  resumeCheckpoint: ReplayUploadCheckpoint | null;
+  resumeDeadline: number | null;
+  continuation: "fresh" | "resuming" | "resumed";
+  pendingOperations: number;
+  intentOwned: boolean;
+  ownershipReleased: boolean;
+  ownedRecordingId: string | null;
 }
 
 type Outcome =
@@ -200,6 +230,9 @@ export function createReplayUploader({
   getRoute = () => (typeof window === "undefined" ? "/" : window.location.pathname),
   randomUUID = () => crypto.randomUUID(),
   onRecordingLost = () => {},
+  beforeRegistration,
+  acquireOwnership,
+  onRecordingEnded = () => {},
   baseUrl = "/api/epic/replay",
 }: ReplayUploaderOptions) {
   let current: Recording | null = null;
@@ -215,6 +248,9 @@ export function createReplayUploader({
   let ticker: ReturnType<typeof setInterval> | undefined;
   let wakeTimer: ReturnType<typeof setTimeout> | undefined;
   let requestOwner: Recording | null = null;
+  let pendingContinuations = 0;
+  let handoffQuiesced = false;
+  let handedOff = false;
   const listeners = new Set<() => void>();
   let state: ReplayUploadState = buildState();
 
@@ -257,7 +293,13 @@ export function createReplayUploader({
 
   function recordHistory(rec: Recording) {
     if (!rec.reference) return;
-    if (!historyRecordings.includes(rec)) historyRecordings = [rec, ...historyRecordings].slice(0, HISTORY_LIMIT);
+    if (!historyRecordings.includes(rec)) {
+      // Same-document revalidation replaces the local producer, not the durable
+      // recording. Keep one row with its cumulative receipts; saved references
+      // remain immutable values held by their original consumers.
+      const id = rec.reference.recordingId;
+      historyRecordings = [rec, ...historyRecordings.filter((entry) => entry.reference?.recordingId !== id)].slice(0, HISTORY_LIMIT);
+    }
     history = historyRecordings.map(
       (entry): ReplayRecordingHistoryEntry => ({
         reference: entry.reference!,
@@ -283,7 +325,7 @@ export function createReplayUploader({
   // ---- lifecycle ---------------------------------------------------------
 
   function ensureTicker() {
-    if (ticker !== undefined) return;
+    if (ticker !== undefined || handoffQuiesced) return;
     ticker = setInterval(() => safely(tick), TICK_MS);
   }
 
@@ -296,6 +338,7 @@ export function createReplayUploader({
   }
 
   function tick() {
+    if (handoffQuiesced) return;
     for (const rec of [current, ...closing]) {
       if (!rec || rec.phase === "ended") continue;
       if (!checkRetention(rec)) continue;
@@ -310,11 +353,12 @@ export function createReplayUploader({
     } catch {
       // Every internal failure becomes state, never an exception for callers.
       if (current && current.phase !== "ended") end(current, "unavailable", "unavailable", false);
+      else terminal = { status: "unavailable", reason: "unavailable" };
       notify();
     }
   }
 
-  function startRecording(boundary: number, first: eventWithTime): Recording {
+  function startRecording(boundary: number, first: { timestamp: number }): Recording {
     const configVersion = getConfigVersion();
     const limits = getLimits();
     const viewport = getViewport();
@@ -353,10 +397,49 @@ export function createReplayUploader({
       outcome: "open",
       reason: null,
       offline: false,
+      lastAcknowledgment: null,
+      snapshotReceived: false,
+      opening: "meta",
+      postOpeningBatches: 0,
+      resumeCheckpoint: null,
+      resumeDeadline: null,
+      continuation: "fresh",
+      pendingOperations: 0,
+      intentOwned: false,
+      ownershipReleased: false,
+      ownedRecordingId: null,
     };
     Object.freeze(rec.registration);
     if (!configVersion || !configVersion.trim()) end(rec, "not_configured", "unavailable", false);
     return rec;
+  }
+
+  function releaseOwnership(rec: Recording) {
+    if (rec.phase !== "ended" || rec.pendingOperations > 0 || rec.busy || rec.ownershipReleased) return;
+    rec.ownershipReleased = true;
+    try { onRecordingEnded(rec.registration, rec.reference?.recordingId ?? rec.ownedRecordingId); } catch { /* Host isolation. */ }
+  }
+
+  function runOperation(rec: Recording, operation: () => Promise<void>) {
+    pendingContinuations++;
+    rec.pendingOperations++;
+    void operation().catch(() => {
+      end(rec, "unavailable", "incomplete", false);
+    }).finally(() => {
+      pendingContinuations--;
+      rec.pendingOperations--;
+      releaseOwnership(rec);
+      // Ownership acquisition and receipt application are part of the same
+      // serialized operation as the request. Only now may any recording pump.
+      safely(() => {
+        if (pendingContinuations === 0) {
+          for (const pending of [...closing, current]) {
+            if (pending && pending.phase !== "ended" && checkRetention(pending)) pump(pending);
+          }
+        }
+      });
+      notify();
+    });
   }
 
   /** Ends a recording: discards its local events and timers; history keeps its reference. */
@@ -381,6 +464,7 @@ export function createReplayUploader({
     if (rec === current) terminal = { status: "unavailable", reason };
     closing = closing.filter((other) => other !== rec);
     stopTickerIfIdle();
+    releaseOwnership(rec);
     if (lost && rec === current && !halted) {
       try {
         onRecordingLost(reason);
@@ -418,6 +502,22 @@ export function createReplayUploader({
 
   function fitsAlone(rec: Recording, bytes: number) {
     return envelopeBytes(rec) + bytes <= rec.limits.maxBatchBytes;
+  }
+
+  /** The first batch of every producer, including a successor, opens atomically. */
+  function checkOpeningPair(rec: Recording): boolean {
+    if (rec.snapshotReceived || rec.inflight || rec.queue.length < 2) return true;
+    const [meta, snapshot] = rec.queue;
+    if (meta!.event.type !== 4 || snapshot!.event.type !== 2) {
+      end(rec, "invalid_request", "unavailable", false);
+      return false;
+    }
+    if (rec.limits.maxBatchEvents < 2 ||
+      envelopeBytes(rec) + meta!.bytes + 1 + snapshot!.bytes > rec.limits.maxBatchBytes) {
+      end(rec, "snapshot_too_large", "unavailable", false);
+      return false;
+    }
+    return true;
   }
 
   function elapsed(since: { mono: number; wall: number }) {
@@ -458,7 +558,8 @@ export function createReplayUploader({
     rec.busy = true;
     const oldest = rec.inflight?.oldest ?? rec.queue[0];
     const remaining = oldest ? Math.max(0, rec.limits.maxBufferAgeMs - elapsed(oldest)) : REPLAY_UPLOAD_REQUEST_TIMEOUT_MS;
-    const deadline = setTimeout(() => controller.abort(), Math.min(REPLAY_UPLOAD_REQUEST_TIMEOUT_MS, remaining));
+    const resumeRemaining = rec.resumeDeadline === null ? Infinity : Math.max(0, rec.resumeDeadline - wallNow());
+    const deadline = setTimeout(() => controller.abort(), Math.min(REPLAY_UPLOAD_REQUEST_TIMEOUT_MS, remaining, resumeRemaining));
     notify();
     let outcome: Outcome;
     try {
@@ -491,7 +592,7 @@ export function createReplayUploader({
       rec.abortController = null;
       if (requestOwner === rec) requestOwner = null;
       rec.busy = false;
-      if (liveRecordings().length > 0) {
+      if (liveRecordings().length > 0 && !handoffQuiesced) {
         clearTimeout(wakeTimer);
         // Let the request's own continuation apply its receipt before waking
         // another recording; otherwise the just-accepted batch can be resent.
@@ -501,6 +602,7 @@ export function createReplayUploader({
             for (const pending of [...closing, current]) {
               if (pending && pending.phase !== "ended" && checkRetention(pending)) pump(pending);
             }
+            notify();
           });
         }, 0);
       }
@@ -554,22 +656,22 @@ export function createReplayUploader({
   }
 
   function pump(rec: Recording) {
-    if (rec.phase === "ended" || rec.busy || requestOwner !== null || rec.retryTimer !== undefined) return;
+    if (handoffQuiesced || pendingContinuations > 0 || rec.phase === "ended" || rec.busy || requestOwner !== null || rec.retryTimer !== undefined) return;
     if (offline(rec)) {
       ensureTicker();
       return;
     }
     if (rec.phase === "registering") {
-      if (rec.identityReady) void register(rec);
-      else void establishIdentity(rec);
+      if (rec.identityReady) runOperation(rec, () => register(rec));
+      else runOperation(rec, () => establishIdentity(rec));
       return;
     }
     if (rec.renewing) {
-      void renew(rec);
+      runOperation(rec, () => renew(rec));
       return;
     }
     if (rec.inflight) {
-      void upload(rec);
+      runOperation(rec, () => upload(rec));
       return;
     }
     const due =
@@ -579,12 +681,15 @@ export function createReplayUploader({
       (rec.queue.length > 0 && monotonicNow() - rec.lastFlushAt >= rec.limits.flushIntervalMs);
     if (!due) return;
     if (rec.queue.length === 0 && !rec.finalRequested) return;
-    rec.inflight = freeze(rec);
-    void upload(rec);
+    const batch = freeze(rec);
+    if (!batch) return;
+    rec.inflight = batch;
+    runOperation(rec, () => upload(rec));
   }
 
   /** Freezes the next batch: id, sequence, events and final never change after this. */
-  function freeze(rec: Recording): FrozenBatch {
+  function freeze(rec: Recording): FrozenBatch | null {
+    if (!checkOpeningPair(rec) || (!rec.snapshotReceived && rec.queue.length < 2)) return null;
     const budget = rec.limits.maxBatchBytes - envelopeBytes(rec);
     const taken: Queued[] = [];
     let bytes = 0;
@@ -621,6 +726,11 @@ export function createReplayUploader({
     const outcome = await send(rec, "/identity", { contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION });
     if (!outcome) return;
     if (outcome.kind !== "ok") {
+      if (rec.resumeCheckpoint) {
+        end(rec, outcome.kind === "error" ? outcome.code : "unavailable", "incomplete", false);
+        notify();
+        return;
+      }
       if (offline(rec) && outcome.kind === "transient") rec.identityAttempts--;
       if (fail(rec, outcome, rec.identityAttempts) === "renew") end(rec, "identity_required", "unavailable", false);
       notify();
@@ -636,11 +746,52 @@ export function createReplayUploader({
     notify();
   }
 
+  async function own(rec: Recording, acquire: (signal: AbortSignal) => Promise<boolean>): Promise<boolean> {
+    const controller = new AbortController();
+    rec.abortController = controller;
+    rec.busy = true;
+    requestOwner = rec;
+    const duration = Math.min(REPLAY_UPLOAD_REQUEST_TIMEOUT_MS,
+      rec.resumeDeadline === null ? Infinity : Math.max(0, rec.resumeDeadline - wallNow()));
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (duration <= 0) return false;
+      const cancelled = new Promise<boolean>((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve(false), { once: true });
+        deadline = setTimeout(() => controller.abort(), duration);
+      });
+      const allowed = await Promise.race([acquire(controller.signal), cancelled]);
+      return allowed && !controller.signal.aborted && rec.phase !== "ended";
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(deadline);
+      rec.abortController = null;
+      rec.busy = false;
+      if (requestOwner === rec) requestOwner = null;
+    }
+  }
+
   async function register(rec: Recording) {
+    if (!rec.intentOwned && beforeRegistration) {
+      if (!await own(rec, (signal) => beforeRegistration(rec.registration, signal))) {
+        end(rec, "unavailable", "unavailable", false);
+        return;
+      }
+      rec.intentOwned = true;
+    }
+    if (!liveRecordings().includes(rec)) return;
     rec.registrationAttempts++;
     const outcome = await send(rec, "/recordings", rec.registration);
     if (!outcome) return;
     if (outcome.kind !== "ok") {
+      // A consumed handoff is one attempt. Lost/uncertain registration is
+      // not retried into an apparently proven continuation.
+      if (rec.resumeCheckpoint) {
+        end(rec, outcome.kind === "error" ? outcome.code : "unavailable", "incomplete", false);
+        notify();
+        return;
+      }
       if (offline(rec) && outcome.kind === "transient") rec.registrationAttempts--;
       if (fail(rec, outcome, rec.registrationAttempts) === "renew") end(rec, "unavailable", "unavailable", false);
       notify();
@@ -656,11 +807,27 @@ export function createReplayUploader({
     // This new boundary has not uploaded anything before receiving its first
     // registration acknowledgment. A nonzero sequence belongs to a producer
     // whose history this instance cannot prove; never splice our snapshot in.
-    if (capability.nextSequence !== 0) {
-      end(rec, "out_of_order", "incomplete", true);
+    const checkpoint = rec.resumeCheckpoint;
+    if (checkpoint ? (
+      capability.recordingId !== checkpoint.recordingId ||
+      capability.startedAt !== checkpoint.startedAt ||
+      capability.nextSequence !== checkpoint.nextSequence ||
+      Object.entries(checkpoint.limits).some(([key, value]) => capability.limits[key as keyof Limits] !== value) ||
+      ["incomplete", "unavailable", "expired", "deleted"].includes(capability.availability)
+    ) : capability.nextSequence !== 0) {
+      end(rec, "out_of_order", "incomplete", !checkpoint);
       notify();
       return;
     }
+    // An acquisition may finish immediately before cancellation, before the
+    // public reference is bound. Cleanup must still know which lease to release.
+    rec.ownedRecordingId = capability.recordingId;
+    if (acquireOwnership && !await own(rec, (signal) => acquireOwnership(rec.registration, capability.recordingId, signal))) {
+      end(rec, "unavailable", "unavailable", false);
+      notify();
+      return;
+    }
+    if (rec.phase === "ended") return;
     rec.reference = Object.freeze({
       recordingId: capability.recordingId,
       startedAt: capability.startedAt,
@@ -671,12 +838,13 @@ export function createReplayUploader({
     rec.nextSequence = capability.nextSequence;
     rec.availability = capability.availability;
     rec.phase = "open";
+    rec.resumeDeadline = null;
     rec.lastFlushAt = monotonicNow();
     recordHistory(rec);
     // An event too large for the recording's own limits is never truncated.
     if (rec.queue.some((item) => !fitsAlone(rec, item.bytes))) {
       end(rec, "snapshot_too_large", "unavailable", false);
-    } else if (checkRetention(rec)) {
+    } else if (checkOpeningPair(rec) && checkRetention(rec)) {
       ensureTicker();
       pump(rec);
     }
@@ -759,7 +927,18 @@ export function createReplayUploader({
     rec.inflight = null;
     rec.nextSequence = parsed.data.nextSequence;
     rec.availability = parsed.data.availability;
-    if (parsed.data.delivery === "accepted") rec.acceptedBatches++;
+    if (parsed.data.delivery === "accepted") {
+      rec.acceptedBatches++;
+      if (!batch.body.final) rec.lastAcknowledgment = Object.freeze({ ...parsed.data });
+      const hadSnapshot = rec.snapshotReceived;
+      for (const event of batch.body.events) {
+        if (rec.opening === "meta") rec.opening = event.type === 4 ? "snapshot" : "invalid";
+        else if (rec.opening === "snapshot") rec.opening = event.type === 2 ? "received" : "invalid";
+      }
+      rec.snapshotReceived = rec.opening === "received";
+      if (hadSnapshot && batch.body.events.length > 0) rec.postOpeningBatches++;
+      if (rec.continuation === "resuming" && rec.snapshotReceived) rec.continuation = "resumed";
+    }
     if (batch.body.final) {
       rec.outcome = "closed";
       rec.phase = "ended";
@@ -772,6 +951,7 @@ export function createReplayUploader({
         terminal = { status: "idle", reason: null };
       }
       stopTickerIfIdle();
+      releaseOwnership(rec);
     } else {
       recordHistory(rec);
       pump(rec);
@@ -782,7 +962,7 @@ export function createReplayUploader({
   // ---- sink --------------------------------------------------------------
 
   function push(event: eventWithTime, boundary: number) {
-    if (halted) return;
+    if (halted || handoffQuiesced) return;
     if (boundary < lastBoundary || (boundary === lastBoundary && current?.boundary !== boundary)) return;
     if (boundary > lastBoundary) {
       retireCurrent();
@@ -791,6 +971,7 @@ export function createReplayUploader({
       terminal = { status: "idle", reason: null };
     }
     const rec = current!;
+    if (rec.resumeCheckpoint && rec.phase === "registering") return;
     if (rec.phase === "ended") {
       notify();
       return;
@@ -807,7 +988,7 @@ export function createReplayUploader({
     rec.queue.push({ event: JSON.parse(serialized) as eventWithTime, bytes, mono: monotonicNow(), wall: wallNow() });
     rec.queueBytes += bytes;
     ensureTicker();
-    if (checkRetention(rec)) pump(rec);
+    if (checkOpeningPair(rec) && checkRetention(rec)) pump(rec);
     notify();
   }
 
@@ -825,6 +1006,33 @@ export function createReplayUploader({
     ticker = undefined;
     clearTimeout(wakeTimer);
     wakeTimer = undefined;
+    handoffQuiesced = false;
+    handedOff = false;
+  }
+
+  function checkpoint(): ReplayUploadCheckpoint | null {
+    const rec = current;
+    if (
+      !rec || rec.phase !== "open" || !rec.reference || !rec.snapshotReceived || !rec.lastAcknowledgment ||
+      rec.finalRequested || rec.queue.length !== 0 || rec.queueBytes !== 0 || rec.inflight ||
+      requestOwner || rec.busy || rec.renewing || rec.retryTimer !== undefined ||
+      pendingContinuations !== 0 || closing.length !== 0 || rec.offline || !isOnline() ||
+      wakeTimer !== undefined || rec.lastAcknowledgment.nextSequence !== rec.nextSequence
+    ) return null;
+    return replayUploadCheckpointSchema.parse({
+      registration: rec.registration,
+      recordingId: rec.reference.recordingId,
+      startedAt: rec.reference.startedAt,
+      nextSequence: rec.nextSequence,
+      limits: { ...rec.limits },
+      lastAcknowledgment: rec.lastAcknowledgment,
+      acceptedBatches: rec.acceptedBatches,
+      snapshotReceived: true,
+    });
+  }
+
+  function safeCheckpoint(): ReplayUploadCheckpoint | null {
+    try { return checkpoint(); } catch { return null; }
   }
 
   const uploader = {
@@ -840,6 +1048,124 @@ export function createReplayUploader({
       });
     },
 
+    /** A pure metadata view; an ACK cursor never substitutes for local receipt evidence. */
+    getCheckpoint(): ReplayUploadCheckpoint | null {
+      return safeCheckpoint();
+    },
+
+    /** Caller must detach capture first. Does not drop queued events or send final. */
+    quiesceForHandoff(): ReplayUploadCheckpoint | null {
+      handoffQuiesced = true;
+      if (ticker !== undefined) clearInterval(ticker);
+      ticker = undefined;
+      clearTimeout(wakeTimer);
+      wakeTimer = undefined;
+      const result = safeCheckpoint();
+      if (!result) {
+        handoffQuiesced = false;
+        if (liveRecordings().length > 0) ensureTicker();
+      }
+      return result;
+    },
+
+    /** Metadata was persisted under ownership. Retire locally without closing centrally. */
+    commitHandoff(): boolean {
+      if (!handoffQuiesced || !safeCheckpoint() || !current) return false;
+      const rec = current;
+      generation++;
+      halted = true;
+      handedOff = true;
+      rec.phase = "ended";
+      rec.token = null;
+      // The server may stay open forever if nobody resumes. This is not a close ACK.
+      rec.outcome = "open";
+      recordHistory(rec);
+      current = null;
+      terminal = { status: "idle", reason: null };
+      releaseOwnership(rec);
+      notify();
+      return true;
+    },
+
+    /** A consumed handoff or this producer's quiesced frontier, under continued ownership. */
+    async resumeFromCheckpoint(
+      input: ReplayUploadCheckpoint,
+      boundary = 1,
+      options: { signal?: AbortSignal; deadline?: number; revalidate?: boolean } = {},
+    ): Promise<boolean> {
+      const parsed = replayUploadCheckpointSchema.safeParse(input);
+      if (!parsed.success || options.signal?.aborted || requestOwner || pendingContinuations > 0 ||
+        boundary <= lastBoundary || (options.deadline !== undefined && options.deadline <= wallNow())) return false;
+      const saved = parsed.data;
+      if (saved.registration.configVersion !== getConfigVersion() || saved.registration.release !== documentRelease(getDocumentRelease())) return false;
+      const predecessor = options.revalidate ? current : null;
+      if (options.revalidate) {
+        const ownedFrontier = handoffQuiesced ? safeCheckpoint() : null;
+        if (!predecessor || !ownedFrontier || JSON.stringify(ownedFrontier) !== JSON.stringify(saved)) return false;
+      } else if (liveRecordings().length > 0) return false;
+      const rec = startRecording(boundary, { timestamp: saved.startedAt });
+      if (rec.phase === "ended") return false;
+      if (predecessor) {
+        // No events, requests, timers or receipt continuations remain. Transfer
+        // the lease to the successor without invoking the release callback.
+        predecessor.phase = "ended";
+        predecessor.token = null;
+        predecessor.ownershipReleased = true;
+        rec.intentOwned = predecessor.intentOwned;
+      }
+      halted = false;
+      handoffQuiesced = false;
+      handedOff = false;
+      rec.registration = Object.freeze(saved.registration);
+      rec.resumeCheckpoint = saved;
+      // The caller already holds this recording's lease during resume identity
+      // bootstrap. Abort before registration still owes that lease a release.
+      rec.ownedRecordingId = saved.recordingId;
+      rec.resumeDeadline = options.deadline ?? wallNow() + REPLAY_UPLOAD_REQUEST_TIMEOUT_MS;
+      rec.continuation = "resuming";
+      rec.nextSequence = saved.nextSequence;
+      rec.acceptedBatches = saved.acceptedBatches;
+      rec.lastAcknowledgment = Object.freeze(saved.lastAcknowledgment);
+      current = rec;
+      lastBoundary = boundary;
+      terminal = { status: "idle", reason: null };
+      return new Promise<boolean>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done || rec.phase === "registering") return;
+          done = true;
+          listeners.delete(finish);
+          options.signal?.removeEventListener("abort", abort);
+          clearTimeout(deadline);
+          resolve(rec.phase === "open");
+        };
+        const abort = () => {
+          end(rec, "unavailable", "incomplete", false);
+          notify();
+        };
+        listeners.add(finish);
+        options.signal?.addEventListener("abort", abort, { once: true });
+        const deadline = setTimeout(abort, Math.max(0, rec.resumeDeadline! - wallNow()));
+        pump(rec);
+        notify();
+      });
+    },
+
+    getProgress(): ReplayUploadProgress {
+      return {
+        snapshotReceived: current?.snapshotReceived ?? false,
+        acceptedBatches: current?.acceptedBatches ?? 0,
+        postOpeningBatches: current?.postOpeningBatches ?? 0,
+        continuity: handedOff ? "handoff" : current?.continuation ?? "fresh",
+      };
+    },
+
+    /** Stop first; a rejected/aborted promise is not proof its request has settled. */
+    hasPendingWork(): boolean {
+      return pendingContinuations > 0 || requestOwner !== null || closing.length > 0 ||
+        liveRecordings().some((rec) => rec.busy || rec.inflight !== null || rec.queue.length > 0 || rec.retryTimer !== undefined);
+    },
+
     /**
      * Best effort on pagehide: one final keepalive request, only when its
      * entire encoded body is <= 64 KiB and nothing else is in flight. Never
@@ -847,11 +1173,17 @@ export function createReplayUploader({
      */
     flushOnPageHide(): void {
       safely(() => {
+        // Failed checkpoint persistence falls back to the existing final path.
+        handoffQuiesced = false;
         const rec = current;
-        if (!rec || rec.phase !== "open" || rec.busy || requestOwner !== null || rec.inflight || rec.retryTimer !== undefined || rec.offline) return;
+        if (!rec || rec.phase !== "open" || rec.busy || requestOwner !== null || rec.inflight || rec.retryTimer !== undefined || rec.offline || pendingContinuations > 0) return;
         if (!checkRetention(rec)) return;
         rec.finalRequested = true;
         const batch = freeze(rec);
+        if (!batch) {
+          notify();
+          return;
+        }
         if (rec.queue.length > 0 || jsonByteLength(batch.body) > KEEPALIVE_MAX_BYTES) {
           // Too large for keepalive: put the events back unchanged.
           rec.queue = [
@@ -863,7 +1195,7 @@ export function createReplayUploader({
           return;
         }
         rec.inflight = batch;
-        void upload(rec, true);
+        runOperation(rec, () => upload(rec, true));
         notify();
       });
     },
@@ -876,6 +1208,7 @@ export function createReplayUploader({
     /** Only an explicit pipeline restart releases its exhausted recovery budget. */
     resume(): void {
       halted = false;
+      handoffQuiesced = false;
     },
 
     dispose(): void {

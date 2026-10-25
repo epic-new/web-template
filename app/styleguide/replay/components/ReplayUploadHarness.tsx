@@ -43,7 +43,7 @@ const TARGETS: { value: ReplayUploadTarget; label: string; description: string }
  * synthetic fixture. Nothing here is evidence that a recording is playable.
  */
 export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'second' }) {
-  const { state, setTarget, setFixtureMode, start, stop, emitCustomEvent, sendForgedRequests } = usePreviewReplayUploadControls()
+  const { state, setTarget, setFixtureMode, start, stop, restart, emitCustomEvent, sendForgedRequests } = usePreviewReplayUploadControls()
   const { consent, grant, withdraw, notice } = useManageReplayConsent()
   const synthetic = state.target === 'synthetic'
 
@@ -98,12 +98,10 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
               </div>
             </div>
           ) : (
-            state.policySource === 'harness' && (
-              <p className="text-xs text-muted-foreground">
-                The deployment&apos;s replay policy is inactive, so the harness development policy gates capture; requests
-                still go to the real relay.
-              </p>
-            )
+            <p className="text-xs text-muted-foreground">
+              Uses the application&apos;s root provider and its configuration, consent and identity gates.
+              An inactive application policy stays disabled.
+            </p>
           )}
         </CardContent>
       </Card>
@@ -130,6 +128,9 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
               </Button>
               <Button variant="outline" onClick={stop} disabled={!state.running}>
                 Stop recording
+              </Button>
+              <Button variant="outline" onClick={restart}>
+                Restart recording
               </Button>
               <Button variant="secondary" onClick={emitCustomEvent}>
                 Emit custom event

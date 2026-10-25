@@ -1,5 +1,5 @@
 import { record as rrwebRecord } from "@rrweb/record";
-import type { eventWithTime } from "@rrweb/types";
+import { EventType, type eventWithTime } from "@rrweb/types";
 
 import type { PublicReplayConfig } from "./replay-config.contract";
 import { epicReplayConsent, type ReplayConsentSource } from "./replay-consent";
@@ -8,6 +8,7 @@ import type { ReplayEventSink } from "./replay-buffer";
 import { createReplayEventSanitizer } from "./replay-event-sanitizer";
 import { evaluateCapturePermission, type ReplayBlockReason } from "./replay-permission";
 import { buildReplayRecordOptions } from "./replay-record-options";
+import { jsonByteLength } from "./replay-redaction";
 import { normalizeReplayPath } from "./replay-routes";
 import { replaySampler, type ReplaySampler } from "./replay-sampling";
 
@@ -41,7 +42,7 @@ type RecordFn = typeof rrwebRecord;
 
 export interface ReplayCaptureState {
   status: "capturing" | "blocked";
-  reason: ReplayBlockReason | "transport_unavailable" | null;
+  reason: ReplayBlockReason | "transport_unavailable" | "identity_pending" | "document_loading" | "opening_snapshot" | null;
   boundary: number;
 }
 
@@ -53,6 +54,8 @@ export interface ReplayCaptureSessionOptions {
   sampler?: ReplaySampler;
   record?: RecordFn;
   getPathname?: () => string;
+  /** Root-owned identity/producer gate, checked again for every event. */
+  getCaptureAllowed?: () => boolean;
 }
 
 export function createReplayCaptureSession({
@@ -63,13 +66,24 @@ export function createReplayCaptureSession({
   sampler = replaySampler,
   record = rrwebRecord,
   getPathname = () => window.location.pathname,
+  getCaptureAllowed = () => true,
 }: ReplayCaptureSessionOptions) {
   let state: ReplayCaptureState = { status: "blocked", reason: "policy_disabled", boundary: 0 };
-  let active: { boundary: number; privacy: string; stop?: () => void } | null = null;
+  let active: {
+    boundary: number;
+    privacy: string;
+    stop?: () => void;
+    openingMeta?: eventWithTime;
+    openingTimer?: ReturnType<typeof setTimeout>;
+    opened: boolean;
+    admittingOpening: boolean;
+  } | null = null;
   // A recorder that threw stays off until the policy changes.
   let failed = false;
   let started = false;
   let pendingStart: ReturnType<typeof setTimeout> | undefined;
+  let removeReadyListeners: (() => void) | undefined;
+  let startGeneration = 0;
   const cleanups: (() => void)[] = [];
   const listeners = new Set<() => void>();
 
@@ -96,9 +110,63 @@ export function createReplayCaptureSession({
     };
   }
 
+  function captureAllowed(): boolean {
+    try {
+      return getCaptureAllowed();
+    } catch {
+      return false;
+    }
+  }
+
+  function cancelPendingStart() {
+    startGeneration++;
+    clearTimeout(pendingStart);
+    pendingStart = undefined;
+    removeReadyListeners?.();
+    removeReadyListeners = undefined;
+  }
+
+  function deferStart() {
+    if (pendingStart !== undefined) return;
+    const generation = startGeneration;
+    pendingStart = setTimeout(() => {
+      pendingStart = undefined;
+      if (generation === startGeneration) evaluate();
+    }, 0);
+  }
+
+  function documentReady(): boolean {
+    if (removeReadyListeners) return false;
+    if (document.readyState !== "loading") return true;
+    const generation = startGeneration;
+    const onReady = () => {
+      if (generation !== startGeneration || document.readyState === "loading") return;
+      removeReadyListeners?.();
+      removeReadyListeners = undefined;
+      // Do not install rrweb from within the lifecycle event it also observes.
+      // Re-evaluate all gates in a later task, after this document has committed.
+      deferStart();
+    };
+    document.addEventListener("DOMContentLoaded", onReady);
+    document.addEventListener("readystatechange", onReady);
+    window.addEventListener("load", onReady);
+    removeReadyListeners = () => {
+      document.removeEventListener("DOMContentLoaded", onReady);
+      document.removeEventListener("readystatechange", onReady);
+      window.removeEventListener("load", onReady);
+    };
+    // Publish only after cleanup is installed: a synchronous subscriber can
+    // dispose/withdraw while receiving this state and must remove this wait.
+    setState({ status: "blocked", reason: "document_loading", boundary: state.boundary });
+    onReady();
+    return false;
+  }
+
   function stopRecorder() {
     const current = active;
     active = null;
+    clearTimeout(current?.openingTimer);
+    if (current) current.openingMeta = undefined;
     try {
       current?.stop?.();
     } catch {
@@ -106,7 +174,7 @@ export function createReplayCaptureSession({
     }
   }
 
-  function block(reason: ReplayBlockReason) {
+  function block(reason: NonNullable<ReplayCaptureState["reason"]>) {
     stopRecorder();
     setState({ status: "blocked", reason, boundary: state.boundary });
   }
@@ -118,28 +186,92 @@ export function createReplayCaptureSession({
 
   function startRecorder(policy: PublicReplayConfig) {
     const boundary = state.boundary + 1;
-    const session = { boundary, privacy: JSON.stringify(policy.capture.privacy) } as NonNullable<typeof active>;
+    const session: NonNullable<typeof active> = {
+      boundary, privacy: JSON.stringify(policy.capture.privacy), opened: false, admittingOpening: false,
+    };
     // Node context (for value-only mutations) never crosses a boundary.
     const sanitizer = createReplayEventSanitizer();
     active = session;
-    setState({ status: "capturing", reason: null, boundary });
+    setState({ status: "blocked", reason: "opening_snapshot", boundary });
+    if (!started || active !== session) return;
+    if (!captureAllowed()) {
+      block("identity_pending");
+      return;
+    }
+    const openingMono = performance.now();
+    const openingWall = Date.now();
+    const openingAge = policy.recording.limits.maxBufferAgeMs;
+    session.openingTimer = setTimeout(() => {
+      if (active === session && !session.opened) fail();
+    }, openingAge);
 
     const emit = (event: eventWithTime) => {
-      if (active !== session) return;
+      if (active !== session || session.admittingOpening) return;
       const { result } = permission(getPathname());
       if (!result.allowed) {
         block(result.reason);
         return;
       }
+      if (!captureAllowed()) {
+        block("identity_pending");
+        return;
+      }
       try {
-        sink.push(sanitizer.sanitize(event), boundary);
+        const sanitized = sanitizer.sanitize(event);
+        if (!session.opened) {
+          if (Math.max(performance.now() - openingMono, Date.now() - openingWall, 0) >= openingAge ||
+              !Number.isSafeInteger(event.timestamp) || event.timestamp < 0 ||
+              jsonByteLength(sanitized) > Math.min(policy.recording.limits.maxBufferBytes, policy.recording.limits.maxBatchBytes)) {
+            fail();
+            return;
+          }
+          if (!session.openingMeta) {
+            if (event.type !== EventType.Meta || typeof (event.data as { href?: unknown }).href !== "string") {
+              fail();
+              return;
+            }
+            session.openingMeta = sanitized;
+            return;
+          }
+          const node = (event.data as { node?: unknown }).node;
+          const root = node as { type?: unknown; id?: unknown; childNodes?: unknown } | undefined;
+          if (event.type !== EventType.FullSnapshot || !node || typeof node !== "object" || Array.isArray(node) ||
+              root?.type !== 0 || typeof root.id !== "number" || !Number.isSafeInteger(root.id) || root.id < 1 || !Array.isArray(root.childNodes) ||
+              event.timestamp < session.openingMeta.timestamp ||
+              jsonByteLength(session.openingMeta) + jsonByteLength(sanitized) + 3 > policy.recording.limits.maxBufferBytes) {
+            fail();
+            return;
+          }
+          const meta = session.openingMeta;
+          session.openingMeta = undefined;
+          clearTimeout(session.openingTimer);
+          session.openingTimer = undefined;
+          session.admittingOpening = true;
+          // Neither event reaches the sink until the complete pair is known.
+          // The original Meta timestamp is retained for the uploader's start.
+          sink.push(meta, boundary);
+          if (active !== session) return;
+          if (!captureAllowed()) {
+            block("identity_pending");
+            return;
+          }
+          sink.push(sanitized, boundary);
+          session.admittingOpening = false;
+          if (active === session) {
+            session.opened = true;
+            setState({ status: "capturing", reason: null, boundary });
+          }
+          return;
+        }
+        sink.push(sanitized, boundary);
       } catch {
         fail();
       }
     };
 
     try {
-      // rrweb emits Meta and FullSnapshot synchronously, inside this call.
+      // Only reached after document readiness. A loading rrweb 2.2.0 instance
+      // can emit DOMContentLoaded/Load before its opening Meta/FullSnapshot.
       const stop = record({ emit, ...buildReplayRecordOptions(policy.capture.privacy) });
       if (active === session) session.stop = stop;
       else stop?.();
@@ -157,22 +289,23 @@ export function createReplayCaptureSession({
     if (!started) return;
     const { policy, result } = permission(pathname);
     if (!result.allowed) {
-      clearTimeout(pendingStart);
-      pendingStart = undefined;
+      cancelPendingStart();
       block(result.reason);
+      return;
+    }
+    if (!captureAllowed()) {
+      cancelPendingStart();
+      block("identity_pending");
       return;
     }
     if (active && active.privacy !== JSON.stringify(policy.capture.privacy)) stopRecorder();
     if (active) return;
     if (failed || !allowStart) return;
     if (allowStart === "defer") {
-      clearTimeout(pendingStart);
-      pendingStart = setTimeout(() => {
-        pendingStart = undefined;
-        evaluate();
-      }, 0);
+      deferStart();
       return;
     }
+    if (pendingStart !== undefined || !documentReady()) return;
     startRecorder(policy);
   }
 
@@ -190,8 +323,7 @@ export function createReplayCaptureSession({
   // Stops collection and clears every retained local event, independently of
   // which gate evaluate() then reports.
   function withdraw() {
-    clearTimeout(pendingStart);
-    pendingStart = undefined;
+    cancelPendingStart();
     stopRecorder();
     sink.clear();
   }
@@ -260,15 +392,9 @@ export function createReplayCaptureSession({
      */
     restartBoundary(): void {
       if (!started) return;
-      clearTimeout(pendingStart);
-      pendingStart = undefined;
+      cancelPendingStart();
       stopRecorder();
-      const { policy, result } = permission(getPathname());
-      if (!result.allowed) {
-        block(result.reason);
-        return;
-      }
-      if (!failed) startRecorder(policy);
+      evaluate();
     },
 
     /** Re-evaluates now, e.g. after the policy source was swapped. */
@@ -277,11 +403,16 @@ export function createReplayCaptureSession({
       evaluate();
     },
 
+    /** A resume registration reserved this boundary without initializing rrweb. */
+    retireUnstartedBoundary(): void {
+      if (started || active) return;
+      setState({ ...state, boundary: state.boundary + 1 });
+    },
+
     dispose(reason?: "transport_unavailable"): void {
       if (!started) return;
       started = false;
-      clearTimeout(pendingStart);
-      pendingStart = undefined;
+      cancelPendingStart();
       stopRecorder();
       for (const cleanup of cleanups.splice(0).reverse()) cleanup();
       setState({ status: "blocked", reason: reason ?? state.reason ?? "policy_disabled", boundary: state.boundary });
@@ -290,6 +421,7 @@ export function createReplayCaptureSession({
     getState(): ReplayCaptureState {
       return state;
     },
+    hasFailed(): boolean { return failed; },
 
     subscribe(listener: () => void): () => void {
       listeners.add(listener);

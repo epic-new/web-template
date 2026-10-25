@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/headers", () => ({ headers: vi.fn(), cookies: vi.fn() }));
@@ -9,6 +10,13 @@ import * as schema from "@/db/schema";
 import { PreDB } from "@/lib/db-test";
 import { epicReplayConsent } from "@/lib/replay/replay-consent";
 import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
+import { createReplayRootRuntime, type ReplayRootRuntime } from "@/lib/replay/replay-root-runtime";
+import { createReplayRecordingPipeline } from "@/lib/replay/replay-recording-pipeline";
+import { activeReplayPolicy } from "@/lib/replay/tests/replay-policy.fixture";
+import { createSyntheticBrowserFetch, createSyntheticEpi210 } from "@/lib/replay/tests/synthetic-epi210.core";
+import { EpicReplayContext } from "@/shared/hooks/use-epic-replay.hook";
+import { replayDocumentOwners } from "@/lib/replay/replay-document-owner";
+import { beginReplayIdentityBoundary } from "@/lib/replay/replay-identity";
 import { clearEpicEnv } from "@/lib/replay/tests/runtime-config.fixture";
 import { replayRequest, routeParams, signUp } from "@/lib/replay/tests/replay-route.fixture";
 import { resetPreviewReplayUpload, usePreviewReplayUpload, usePreviewReplayUploadControls } from "../use-preview-replay-upload.hook";
@@ -22,6 +30,7 @@ async function settle(ms = 0) {
 
 // Real sign-up hashing, routes and recorder: generous under a loaded machine.
 describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
+  let runtime: ReplayRootRuntime | null = null;
   beforeEach(() => {
     window.history.replaceState({}, "", "/styleguide/replay/upload");
     window.sessionStorage.clear();
@@ -31,6 +40,7 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
   afterEach(() => {
     cleanup();
     resetPreviewReplayUpload();
+    runtime?.dispose(); runtime = null;
     epicReplayConsent.reset();
     replayLifecycle.reset();
     vi.useRealTimers();
@@ -69,7 +79,7 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
     expect(JSON.stringify(result.current.state)).not.toMatch(/playable|ready/i);
   });
 
-  it("reports the real relay's not_configured with an empty buffer when EPIC_* is unset", async () => {
+  it("keeps an unconfigured application target disabled without synthetic fallback and preserves real forged-route checks", async () => {
     clearEpicEnv();
     await PreDB(db, schema, { user: [], account: [], session: [], replay_recording: [], replay_rate_limit: [] });
     const { cookie } = await signUp("user1@example.com");
@@ -95,14 +105,13 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
       epicReplayConsent.grant();
       result.current.start();
     });
-    await vi.waitFor(() => expect(result.current.state.pipeline.upload.status).toBe("unavailable"));
-
-    expect(result.current.state).toMatchObject({ target: "application", policySource: "harness" });
+    expect(result.current.state).toMatchObject({ target: "application", policySource: "application", provider: { status: "disabled", reason: "provider_unavailable" } });
     expect(result.current.state.pipeline.upload).toMatchObject({
-      reason: "not_configured",
+      status: "idle",
       current: null,
       bufferedEvents: 0,
     });
+    expect(fetch).not.toHaveBeenCalled();
 
     await act(() => result.current.sendForgedRequests());
     expect(result.current.state.forged.map(({ status, code }) => [status, code])).toEqual([
@@ -110,6 +119,73 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
       [503, "not_configured"],
       [503, "not_configured"],
     ]);
+  });
+
+  it("uses the one root pipeline for application capture and exclusively displaces it for synthetic capture", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
+    const fixture = createSyntheticBrowserFetch(createSyntheticEpi210());
+    const policy = activeReplayPolicy();
+    runtime = createReplayRootRuntime({
+      documentRelease: "build-A", fetch: fixture.fetch,
+      getPolicy: () => policy, subscribePolicy: () => () => {}, sampler: { decide: () => true },
+      locks: null, loadPipeline: async () => ({ createReplayRecordingPipeline }),
+    });
+    const root = runtime;
+    act(() => { root.setIdentity("synthetic-user-1"); root.attach(); });
+    const { result } = renderHook(() => usePreviewReplayUpload(), {
+      wrapper: ({ children }: { children: ReactNode }) => <EpicReplayContext.Provider value={root}>{children}</EpicReplayContext.Provider>,
+    });
+    act(() => { epicReplayConsent.grant(); result.current.start(); });
+    await settle(5_000);
+    expect(result.current.state.pipeline).toBe(root.getDiagnostics().pipeline);
+    expect(result.current.state.provider?.reference).toEqual(root.getSnapshot().reference);
+    expect(fixture.log.filter((entry) => entry.path === "/recordings")).toHaveLength(1);
+    const original = root.getSnapshot().reference;
+    expect(original).not.toBeNull();
+    act(() => { result.current.setTarget("synthetic"); result.current.start(); });
+    await settle(5_000);
+    expect(replayDocumentOwners().getOwner()).toBe("harness");
+    expect(root.getDiagnostics().pipeline?.capture.status).toBe("blocked");
+    expect(result.current.state.pipeline.upload.current?.recordingId).not.toBe(original!.recordingId);
+    const applicationRequests = fixture.log.length;
+    act(() => result.current.emitCustomEvent());
+    await settle(5_000);
+    expect(fixture.log).toHaveLength(applicationRequests);
+    expect(result.current.state.policySource).toBe("harness");
+  });
+
+  it("cancels synthetic identity bootstrap before recorder initialization on withdrawal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
+    const { result } = renderHook(() => usePreviewReplayUpload());
+    act(() => {
+      result.current.setTarget("synthetic");
+      epicReplayConsent.grant();
+      result.current.start();
+      epicReplayConsent.withdraw();
+    });
+    await settle(10_000);
+    expect(result.current.state.pipeline.upload.bufferedEvents).toBe(0);
+    expect(result.current.log.filter((entry) => entry.path === "/recordings")).toHaveLength(0);
+  });
+
+  it("stops synthetic capture before auth changes and opens a fresh boundary only after settlement", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
+    const { result } = renderHook(() => usePreviewReplayUpload());
+    act(() => { result.current.setTarget("synthetic"); epicReplayConsent.grant(); result.current.start(); });
+    await settle(5_000);
+    const old = result.current.state.pipeline.upload.current!;
+    expect(old).not.toBeNull();
+    let finish = () => {};
+    act(() => { result.current.emitCustomEvent(); finish = beginReplayIdentityBoundary(); });
+    expect(result.current.state.pipeline.capture.status).toBe("blocked");
+    expect(result.current.state.pipeline.upload.bufferedEvents).toBe(0);
+    act(() => result.current.emitCustomEvent());
+    await settle(5_000);
+    expect(result.current.log.filter((entry) => entry.path === "/recordings")).toHaveLength(1);
+    act(() => finish());
+    await settle(5_000);
+    expect(result.current.state.pipeline.upload.current?.recordingId).not.toBe(old.recordingId);
+    expect(result.current.log.filter((entry) => entry.path === "/recordings")).toHaveLength(2);
   });
 
   it("keeps the control snapshot stable while the real recorder emits events", async () => {

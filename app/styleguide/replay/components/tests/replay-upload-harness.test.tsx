@@ -11,6 +11,7 @@ const hook = vi.hoisted(() => ({
   setFixtureMode: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
+  restart: vi.fn(),
   emitCustomEvent: vi.fn(),
   sendForgedRequests: vi.fn(async () => {}),
 }));
@@ -131,16 +132,36 @@ describe("ReplayUploadHarness", { timeout: 30_000 }, () => {
     show(upload("idle"), { running: false });
 
     fireEvent.click(screen.getByRole("button", { name: "Start recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restart recording" }));
     fireEvent.click(screen.getByRole("button", { name: "Emit custom event" }));
     fireEvent.click(screen.getByRole("button", { name: "Send forged requests" }));
     fireEvent.change(screen.getByLabelText("Fixture mode"), { target: { value: "fail_503" } });
     fireEvent.click(screen.getByLabelText("Application relay"));
 
     expect(hook.start).toHaveBeenCalled();
+    expect(hook.restart).toHaveBeenCalled();
     expect(hook.emitCustomEvent).toHaveBeenCalled();
     expect(hook.sendForgedRequests).toHaveBeenCalled();
     expect(hook.setFixtureMode).toHaveBeenCalledWith("fail_503");
     expect(hook.setTarget).toHaveBeenCalledWith("application");
     expect(screen.getByRole("link", { name: "Navigate" })).toHaveAttribute("href", "/styleguide/replay/upload/second");
+  });
+
+  it("shows actual root continuity and eligibility without claiming playback or active open rows", () => {
+    show(upload("pending"), {
+      target: "application", policySource: "application", eligibleHandoff: true, recoveryDebt: 2,
+      provider: { status: "capturing", reason: null, reference, snapshotReceived: true, continuity: "resumed", evidence: "unverified" },
+    });
+    expect(screen.getByLabelText("Recording continuity")).toHaveTextContent("Continued the same recording; fresh snapshot received");
+    expect(screen.getByLabelText("Recording continuity")).toHaveTextContent("playback not verified");
+    expect(screen.getByLabelText("Recording continuity")).not.toHaveTextContent("after reload");
+    expect(screen.getByText("Eligible acknowledged frontier")).toBeInTheDocument();
+    expect(screen.getByText(/An open row can be stale or unresumed/)).toBeInTheDocument();
+    show(upload("idle"), {
+      target: "application", policySource: "application",
+      provider: { status: "waiting", reason: "unresumed_open", reference: null, snapshotReceived: false, continuity: "handoff", evidence: "unverified" },
+    });
+    expect(screen.getByLabelText("Recording continuity")).toHaveTextContent("server row may remain open");
+    expect(screen.queryByText("Synthetic fixture - not Epic, not rrweb")).toBeNull();
   });
 });

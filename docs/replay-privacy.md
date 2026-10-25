@@ -5,9 +5,9 @@ Everything here runs in the browser before an event enters a buffer. The
 modules live in `lib/replay/`; the development harness at `/styleguide/replay`
 exercises them against synthetic content.
 
-Adding this code records nothing. No capture session runs outside the harness
-until the root provider mounts one, and even then nothing is recorded until the
-host application grants consent.
+The canonical root mounts one lazy EpicReplayProvider. It records nothing until
+runtime policy, consent, route, sampling and acknowledged identity all permit
+capture. The recorder chunk loads only after these gates and DOM readiness.
 
 ## Consent
 
@@ -201,8 +201,9 @@ Raw events and recording capabilities are never stored in the local database.
   `nextSequence` never renumbers it. `out_of_order` ends the recording as
   incomplete.
 - `delivery_uncertain` is never resent: the recording is quarantined, its
-  local events discarded, and - at most `maxAttempts` times per page - a fresh
-  recording starts with a new key and a new FullSnapshot.
+  local events discarded, and - at most `maxAttempts` automatic rotations - a
+  fresh recording starts with a new key and a new FullSnapshot. Root recovery
+  debt survives remounts, automatic boundaries and successful reload handoff.
 - Central receipts are the authority. A recording the server has cached as
   closed or quarantined still reaches Epic, so an exact retry recovers its
   original accepted or finalized acknowledgment.
@@ -213,3 +214,139 @@ Raw events and recording capabilities are never stored in the local database.
 - Withdrawing consent stops capture and drops queued local data. It does not
   delete anything already uploaded, and earlier recording references stay in
   the transport's history.
+
+## Root lifecycle and public context
+
+`useEpicReplay()` in `shared/hooks/use-epic-replay.hook.ts` exposes meaningful
+status/reason, a registered immutable reference, snapshot receipt and continuity.
+It is harmless outside the provider. Event/buffer counters are isolated in
+`useEpicReplayDiagnostics()`; render that opt-in view under `data-private`.
+Registration, snapshot receipt and playable evidence are separate facts.
+
+The server root passes deliberately public `NEXT_PUBLIC_EPIC_DOCUMENT_RELEASE`.
+The first value is frozen for that document, even if a router refresh or runtime
+policy reports a different deployment. `getDocumentRelease` never reads refreshed
+policy.release. Unknown release is null and cannot prove reload continuity.
+Frozen report inputs retain their original recordingId, millisecond startedAt
+and offset; this provider does not implement or reassign report storage.
+
+Authentication entry hooks stop replay synchronously before changing accounts.
+The redirecting sign-out navigation also invalidates capture. A new identity
+waits for visitor reset acknowledgment where needed, then identity POST
+acknowledgment. These requests are serialized and cancellable; replay failures
+never block authentication. Ordinary reload and publishing-token rotation do
+not reset the visitor. A non-secret pending-reset marker may survive an actual
+auth navigation, but no identity, consent, raw event or capability is persisted.
+
+rrweb 2.2.0 can emit DOMContentLoaded/Load before its opening snapshot when
+initialized while loading. Every capture start/restart waits for readiness and
+stages a valid Meta/FullSnapshot pair. Fresh startedAt is the actual Meta
+timestamp. Waiting and staged capture are cancelled on loss of permission.
+
+### Proposed pilot defaults
+
+Provider `lifecycle` options are local public configuration, not new central v1
+fields and not prior measured acceptance:
+
+| Option | Default | Accepted range |
+| --- | --- | --- |
+| maxDurationMs | 30 minutes | 1–60 minutes |
+| inactivityMs | 5 minutes | 30 seconds–15 minutes, bounded by duration |
+| handoffWindowMs | 15 seconds | 1–30 seconds |
+
+Invalid options fall back to bounded defaults. Activity tracks only coarse
+trusted user-event timestamps, never keys or content. Idle capture stops until
+activity returns. Expiry and policy gates always win over lifecycle timers.
+Three automatic recovery rotations is the maximum (policy may lower it).
+Registration and the initial snapshot alone do not replenish that budget;
+healthy capture must last at least 30 seconds with three acknowledged non-final
+batches including post-opening activity, or the host must explicitly restart.
+Pausing capture, including during identity revalidation, or going offline restarts
+the healthy progress interval while preserving accumulated recovery debt. Only
+new batch acknowledgments advance progress. Remounts, ordinary
+policy refreshes, route reentry and repeated consent grants also retain that debt
+and any terminal failure reason.
+
+## Cooperative clean reload handoff
+
+Only a registered non-final stream with an acknowledged opening snapshot and
+an empty, settled ACK frontier can hand off. The old recorder and timers are
+detached before eligibility is checked. No queued/inflight/retry/closing work
+or unknown delivery is discarded to manufacture a clean frontier.
+
+The predecessor holds a cooperative Web Lock throughout recording. Shared
+IndexedDB metadata prearms a one-shot generation while the page is alive.
+Eligible pagehide writes a strict metadata-only sessionStorage checkpoint
+(at most 8 KiB), then retires the old capability locally and releases ownership.
+Only this branch skips the existing final:true pagehide path. The shared ledger
+is bounded to 100 live records and never overwrites a consumed generation.
+
+A successor requires a real reload, no opener/BFCache/history/discarded recovery,
+fresh consent/configuration/identity, matching known document release and effective
+configuration, and the same exclusive lock. It atomically consumes the generation
+before network work, resends the exact original registration, and requires the
+same recordingId, original startedAt and exactly the locally acknowledged
+nextSequence. Fresh registration still rejects nonzero nextSequence. An advanced
+server cursor is never adopted. A fresh Meta/FullSnapshot is appended under that
+same durable recording; “resumed” appears only after its ACK. Actual timestamps
+preserve the gap. Closed or uncertain streams cannot be reopened.
+
+No raw events, capabilities, cookies or auth data enter the checkpoint. Only
+immutable registration/receipt metadata, context fingerprint and remaining
+lifecycle/recovery bounds are retained. Missing locks/storage, stale or malformed
+metadata, changes of subject/context or lost ACKs require conservative rotation.
+Fresh unique recordings may still work with document-local ownership when browser
+locks/storage are unavailable; they cannot reuse an existing stream.
+
+These are cooperating producers within one browser storage bucket. An
+indistinguishable cloned candidate may race; exactly one consumer can win, all
+losers start fresh. This is not cryptographic physical-tab identity or a central
+producer fence: older capabilities remain valid centrally.
+
+### Expiry and the central lifecycle boundary
+
+The reload window starts at the clean offer and cannot be extended by retries;
+preparation itself has a 60-second cap. Duration/inactivity/recovery debt is
+carried forward. Expired metadata prevents reuse, not server cleanup.
+
+Checkpoints compare wall time with `performance.timeOrigin + performance.now()`
+from both documents. Missing, backward, or inconsistent clock proof is rejected;
+the larger valid elapsed delta consumes the remaining window and lifecycle
+limits. This monotonic comparison only applies within one user-agent execution,
+not a browser restart or isolated sessions. A wall-clock rollback cannot extend
+the offer. Identity, lock, registration, and successor snapshot work share that
+same deadline.
+
+Focus/visibility authentication revalidation pauses admission before the policy
+refresh. A clean, owned acknowledged frontier may wait for the same subject and
+fresh policy, then retry its exact registration and append a fresh snapshot.
+This preserves the original recording/start/release and recovery debt. Dirty,
+expired, changed-account or failed revalidation closes that local boundary.
+
+Pagehide cannot know whether a successor will reload. A skipped final with no
+successor leaves a stale unresumed open row; current central v1 has no idle-close
+operation. Open is never evidence of active recording. Dirty/unacknowledged
+unload is incomplete/uncertain, and only an acknowledged final is closed.
+
+Before production handoff, Builder/central owners must settle stale-row
+classification, reconciliation/retention and actual same-recording list/player
+behavior. Broader continuity needs reviewed durable subject-scoped logical
+session/predecessor/ordinal metadata, atomic continuation/fork prevention, explicit
+gaps and Builder consumption. Those fields/endpoints are not invented here.
+
+### Verification boundaries
+
+Vitest covers the real pinned recorder's loading sequence, cancellation, bounded
+root recovery, exact same-recording fixture handoff, stale/clone/expiry rejection,
+identity barriers, stable context and existing real Route/Service/SQLite paths.
+The synthetic fixture is not Cloud receipt, append/playback or production-readiness
+evidence. Native browser verification remains a separate read-only phase, using
+synthetic accounts/content and a controlled relay fixture surviving documents.
+No live customer capture is needed for these local tests.
+
+The bounded [local verification relay](replay-verification.md) now provides
+process-memory state across browser reloads, deterministic cursor/closed-append/
+lost-receipt faults, and metadata-only diagnostics. Tests exercise root runtime
+through the real BFF, identity cookies, Services and SQLite against it. Its
+schema is a local fixture of the v1 contract, not the actual central schema.
+Native Epic-host, central-schema and Cloud playback acceptance remain separate.

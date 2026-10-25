@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 const router = vi.hoisted(() => ({
   replace: vi.fn(),
@@ -26,6 +26,7 @@ import {
 } from "@/shared/tests/test-utils";
 import { headers } from "next/headers";
 import { useSignOut } from "../use-sign-out.hook";
+import { subscribeReplayIdentityBoundary } from "@/lib/replay/replay-identity";
 
 const now = new Date("2026-01-01T00:00:00.000Z");
 const actor = {
@@ -65,12 +66,17 @@ describe("Sign out hook scenarios", () => {
   });
 
   it("revokes the real session, clears admin cache, and navigates", async () => {
+    const phases: string[] = [];
+    onTestFinished(subscribeReplayIdentityBoundary((event) => phases.push(event.phase)));
     await PreDB(db, schema, {
       user: [actor],
       session: [currentSession],
     });
     const authentication = deferred<Awaited<ReturnType<typeof getUser>>>();
-    vi.mocked(getUser).mockReturnValue(authentication.promise);
+    vi.mocked(getUser).mockImplementation(() => {
+      expect(phases).toEqual(["begin"]);
+      return authentication.promise;
+    });
     const client = createTestClient();
     client.setQueryData(adminKeys.stats(actor.id), {
       totalUsers: 1,
@@ -105,10 +111,13 @@ describe("Sign out hook scenarios", () => {
     expect(router.refresh).toHaveBeenCalledOnce();
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current).toMatchObject({ isLoading: false, error: null });
+    expect(phases).toEqual(["begin", "settled"]);
     await PostDB(db, schema, { session: [] });
   });
 
   it("preserves cache and database when session authorization fails", async () => {
+    const phases: string[] = [];
+    onTestFinished(subscribeReplayIdentityBoundary((event) => phases.push(event.phase)));
     await PreDB(db, schema, {
       user: [actor, otherUser],
       session: [currentSession],
@@ -141,6 +150,7 @@ describe("Sign out hook scenarios", () => {
     expect(clearAuthSession).not.toHaveBeenCalled();
     expect(router.replace).not.toHaveBeenCalled();
     expect(router.refresh).not.toHaveBeenCalled();
+    expect(phases).toEqual(["begin", "settled"]);
     await PostDB(db, schema, { session: [currentSession] });
   });
 });

@@ -88,6 +88,24 @@ export function ReplayUploadReadout() {
 
   return (
     <div data-private className="space-y-6">
+      {state.provider && (
+        <div className="space-y-3">
+          <Badge variant="outline" aria-label="Provider state">
+            Root provider: {state.provider.status}{state.provider.reason ? ` - ${state.provider.reason.replace(/_/g, ' ')}` : ''}
+          </Badge>
+          <p className="text-sm text-muted-foreground" aria-label="Recording continuity">
+            {state.provider.continuity === 'resumed' && 'Continued the same recording; fresh snapshot received, playback not verified.'}
+            {state.provider.continuity === 'resuming' && 'Checking recording continuity; the recording has not resumed yet.'}
+            {state.provider.continuity === 'new_recording' && 'New recording; previous continuity could not be established.'}
+            {state.provider.continuity === 'handoff' && 'Unresumed handoff; the server row may remain open.'}
+            {state.provider.continuity === 'fresh' && 'Fresh recording boundary.'}
+          </p>
+          <dl className="grid gap-4 sm:grid-cols-2">
+            <Field label="Clean handoff" value={state.eligibleHandoff ? 'Eligible acknowledged frontier' : 'Not eligible'} />
+            <Field label="Recovery attempts used" value={state.recoveryDebt ?? 0} />
+          </dl>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3">
         <Badge variant={upload.status === 'unavailable' ? 'destructive' : 'secondary'} aria-label="Upload status">
           {replayUploadStatusLabel(upload.status, upload.reason)}
@@ -112,6 +130,7 @@ export function ReplayUploadReadout() {
 
       <div className="space-y-2">
         <h3 className="text-sm font-medium text-foreground">Recording history</h3>
+        <p className="text-xs text-muted-foreground">An open row can be stale or unresumed; its status alone does not establish active capture.</p>
         {upload.history.length === 0 ? (
           <p className="text-sm text-muted-foreground">No recording has been registered in this tab.</p>
         ) : (

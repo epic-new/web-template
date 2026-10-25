@@ -68,11 +68,13 @@ export function useRefreshReplayPolicy() {
     document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("resume", untrusted);
     window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("focus", untrusted);
     return () => {
       clearInterval(heartbeat);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("resume", untrusted);
       window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("focus", untrusted);
     };
   }, [refetch]);
 
