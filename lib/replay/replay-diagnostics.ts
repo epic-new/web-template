@@ -1,4 +1,4 @@
-import { isReplayDiagnosticUrlAllowed, sanitizeNetworkDiagnostic, sanitizeReplayText } from "./replay-redaction";
+import { isReplayDiagnosticUrlAllowed, redactSecrets, sanitizeNetworkDiagnostic, sanitizeReplayText } from "./replay-redaction";
 
 /**
  * Optional console and network context, recorded as rrweb custom events
@@ -215,7 +215,7 @@ export function consoleMessage(args: unknown[]): string {
       }
     })
     .join(" ");
-  return sanitizeReplayText(text, REPLAY_DIAGNOSTIC_LIMITS.maxMessageLength);
+  return sanitizeReplayText(redactSecrets(text), REPLAY_DIAGNOSTIC_LIMITS.maxMessageLength);
 }
 
 /**

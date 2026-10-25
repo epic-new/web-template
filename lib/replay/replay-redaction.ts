@@ -195,16 +195,33 @@ export function sanitizeReplayPayload(value: unknown): unknown {
   }
 }
 
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+const LONG_HEX = /\b[0-9a-f]{32,}\b/gi;
+
+/**
+ * What an app tends to log by accident: addresses, JWTs, auth headers and
+ * long hex secrets. Replaced before the message reaches the recording.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(JWT, "[redacted-token]")
+    .replace(BEARER, "$1 [redacted]")
+    .replace(EMAIL, "[redacted-email]")
+    .replace(LONG_HEX, "[redacted-hex]");
+}
+
 export function sanitizeReplayError(error: unknown): { name: string; message: string; stack: string | null } {
   try {
     if (error instanceof Error) {
       return {
         name: sanitizeReplayText(error.name || "Error", 128),
-        message: sanitizeReplayText(String(error.message)),
-        stack: typeof error.stack === "string" ? sanitizeReplayText(error.stack, 4_096) : null,
+        message: sanitizeReplayText(redactSecrets(String(error.message))),
+        stack: typeof error.stack === "string" ? sanitizeReplayText(redactSecrets(error.stack), 4_096) : null,
       };
     }
-    return { name: "Error", message: sanitizeReplayText(String(error)), stack: null };
+    return { name: "Error", message: sanitizeReplayText(redactSecrets(String(error))), stack: null };
   } catch {
     return { name: "Error", message: REDACTED, stack: null };
   }

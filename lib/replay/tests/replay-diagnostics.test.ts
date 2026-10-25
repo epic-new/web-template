@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CONSOLE_TAG,
   createReplayDiagnostics,
+  consoleMessage,
   diagnosticPath,
   NETWORK_TAG,
   REPLAY_DIAGNOSTIC_LIMITS,
@@ -116,5 +117,17 @@ describe("replay diagnostics", () => {
     expect(diagnosticPath(`${window.location.origin}/a/b?x=1`)).toBe("/a/b");
     expect(diagnosticPath("https://api.example.com/v1/items?key=1")).toBe("https://api.example.com/v1/items");
     expect(diagnosticPath("data:text/plain,hi")).toBeNull();
+  });
+
+  it("redacts addresses, tokens and long secrets an app logs by accident", () => {
+    const message = consoleMessage([
+      "user ana@example.com failed",
+      "Authorization: Bearer abcdefghijklmnop",
+      "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+      "key 0123456789abcdef0123456789abcdef",
+    ]);
+
+    expect(message).not.toMatch(/ana@example\.com|abcdefghijklmnop|eyJhbGci|0123456789abcdef0123/);
+    expect(message).toContain("[redacted-email]");
   });
 });
