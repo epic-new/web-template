@@ -19,6 +19,17 @@ const nextConfig: NextConfig = {
     "*.lvh.me",
     "*.daytonaproxy01.net",
   ],
+  experimental: {
+    serverActions: {
+      // epic-proxy hands a Server Action to a Daytona preview with the Origin
+      // rewritten to Daytona's host while X-Forwarded-Host keeps the preview
+      // host, so Next refused every action — sign-in and sign-up included.
+      // The proxy rewrites only requests carrying the `next-action` header,
+      // which a cross-site page cannot send without passing CORS, so this
+      // origin only ever arrives for a same-origin call.
+      allowedOrigins: ["*.daytonaproxy01.net"],
+    },
+  },
   // Pin the Turbopack root to this checkout. Git worktrees live inside the
   // repo (.worktrees/*), so lockfile inference would otherwise resolve the
   // workspace root to the parent checkout and share its .next/dev/lock,
