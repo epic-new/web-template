@@ -2,6 +2,9 @@ import { z } from "zod";
 
 import { REPLAY_RECORDING_LIMITS, replayRecordingLimitsSchema } from "./replay-config.contract";
 
+/** Browser transport only; Bun's optional runtime helpers are not a fetch dependency. */
+export type ReplayFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
 /**
  * The browser-facing replay upload contract (EPI-210 v1): what the browser may
  * send to `/api/epic/replay/recordings/*`, what it gets back, and the flat

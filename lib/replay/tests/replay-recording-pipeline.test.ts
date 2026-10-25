@@ -15,7 +15,7 @@ function fakeRecord() {
   const record = vi.fn((options?: { emit?: (event: eventWithTime) => void }) => {
     emit = options?.emit;
     emit?.({ type: EventType.Meta, timestamp: Date.now(), data: { href: location.href, width: 1, height: 1 } } as eventWithTime);
-    emit?.({ type: EventType.FullSnapshot, timestamp: Date.now() + 1, data: { node: {} } } as unknown as eventWithTime);
+    emit?.({ type: EventType.FullSnapshot, timestamp: Date.now() + 1, data: { node: { type: 0, id: 1, childNodes: [] } } } as unknown as eventWithTime);
     return vi.fn();
   }) as unknown as typeof rrwebRecord;
   return {

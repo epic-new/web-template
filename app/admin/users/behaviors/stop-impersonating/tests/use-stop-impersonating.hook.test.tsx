@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 vi.mock("next/navigation", () => ({
   redirect: vi.fn(() => { throw new Error("NEXT_REDIRECT"); }),
   unstable_rethrow: vi.fn((error: unknown) => {
@@ -25,9 +25,12 @@ import {
   signUpUser,
 } from "../../../tests/fixtures";
 import { useStopImpersonating } from "../use-stop-impersonating.hook";
+import { subscribeReplayIdentityBoundary } from "@/lib/replay/replay-identity";
 
 describe("useStopImpersonating hook scenarios", () => {
   it("stops the real session, clears admin cache, and redirects", async () => {
+    const phases: string[] = [];
+    onTestFinished(subscribeReplayIdentityBoundary((event) => phases.push(event.phase)));
     await PreDB(db, schema, { user: [], account: [], session: [] });
     const admin = await createAdminAuth();
     const target = await signUpUser({ email: "target@example.com" });
@@ -52,6 +55,7 @@ describe("useStopImpersonating hook scenarios", () => {
       );
     });
     expect(client.getQueryData(key)).toBeUndefined();
+    expect(phases).toEqual(["begin", "settled"]);
     expect((await SessionModel.listByUser(target.id)).every((entry) => !entry.impersonatedBy))
       .toBe(true);
   });

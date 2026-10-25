@@ -1,8 +1,8 @@
 "use client";
 
 import { useSignup } from "../behaviors/signup/use-signup.hook";
-import { signOutAction } from "./signout-action";
-import { useTransition } from "react";
+import { SIGNUP_URL } from "@/app.config";
+import { useAppSignOut } from "@/shared/hooks/use-app-sign-out.hook";
 
 // Simple Lock Icon for Password Field
 const LockIcon = () => (
@@ -42,18 +42,13 @@ interface SignUpFormProps {
 
 export default function SignUpForm({ redirectURL }: SignUpFormProps) {
   const { state, formAction, isLoading } = useSignup(redirectURL);
-  const [isPending, startTransition] = useTransition();
+  const { formAction: handleSignOut, isLoading: isPending, error: signOutError } = useAppSignOut(SIGNUP_URL);
   const isAlreadyLoggedInError = state.error?.includes("already logged in");
-
-  const handleSignOut = () => {
-    startTransition(async () => {
-      await signOutAction();
-    });
-  };
+  const displayedError = signOutError ?? state.error;
 
   return (
     <form action={formAction} className="space-y-6">
-      {state.error && (
+      {displayedError && (
         <div
           className="border-2 border-dashed border-destructive/40 bg-destructive/10 px-4 py-3 relative"
           role="alert"
@@ -62,7 +57,7 @@ export default function SignUpForm({ redirectURL }: SignUpFormProps) {
             ERROR
           </span>
           <div className="block font-mono text-destructive text-sm mt-2">
-            <span>{state.error}</span>
+            <span>{displayedError}</span>
             {isAlreadyLoggedInError && (
               <button
                 type="button"

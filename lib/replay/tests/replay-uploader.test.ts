@@ -4,6 +4,7 @@ import type { eventWithTime } from "@rrweb/types";
 import { REPLAY_RECORDING_LIMITS } from "../replay-config.contract";
 import type { ReplayUploadErrorCode } from "../replay-upload-contract";
 import { createReplayUploader, REPLAY_ERROR_ACTIONS, REPLAY_UPLOAD_REQUEST_TIMEOUT_MS, type ReplayUploaderOptions } from "../replay-uploader";
+import { replayUploadCheckpointSchema } from "../replay-upload-checkpoint";
 import errors from "./fixtures/publishing-errors.v1.json";
 import { createSyntheticBrowserFetch, createSyntheticEpi210, type SyntheticFixtureMode } from "./synthetic-epi210.core";
 
@@ -78,6 +79,14 @@ describe("createReplayUploader", () => {
     vi.useRealTimers();
   });
 
+  it("reports unavailable when registration allocation is blocked, without throwing into capture", () => {
+    const { uploader, fetchSpy } = setup({ randomUUID: () => { throw new Error("blocked"); } });
+    expect(() => uploader.push(meta(), 1)).not.toThrow();
+    expect(uploader.getState()).toMatchObject({ status: "unavailable", reason: "unavailable", current: null });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    uploader.dispose();
+  });
+
   it("registers before any upload and freezes startedAt to the first event", async () => {
     const { uploader, browser, batches, bodies } = setup({ mode: "delay_registration" });
 
@@ -127,7 +136,6 @@ describe("createReplayUploader", () => {
   });
 
   it("retries a lost identity acknowledgment before any registration", async () => {
-    let relay: typeof fetch;
     let identityCalls = 0;
     const fixture = setup({
       fetch: (async (url, init) => {
@@ -135,7 +143,7 @@ describe("createReplayUploader", () => {
         return relay(url, init);
       }) as typeof fetch,
     });
-    relay = fixture.browser.fetch;
+    const relay: typeof fetch = fixture.browser.fetch;
     fixture.uploader.push(meta(), 1);
     fixture.uploader.push(full(), 1);
     await flush(0);
@@ -149,7 +157,6 @@ describe("createReplayUploader", () => {
   });
 
   it("keeps one request in flight across a closing and a new recording", async () => {
-    let relay: typeof fetch;
     let inFlight = 0;
     let maximum = 0;
     const fixture = setup({
@@ -164,7 +171,7 @@ describe("createReplayUploader", () => {
         }
       }) as typeof fetch,
     });
-    relay = fixture.browser.fetch;
+    const relay: typeof fetch = fixture.browser.fetch;
     fixture.uploader.push(meta(), 1);
     fixture.uploader.push(full(), 1);
     await flush(5_000);
@@ -200,7 +207,6 @@ describe("createReplayUploader", () => {
   });
 
   it("keeps one private-data budget when a new boundary replaces a pending one", async () => {
-    let relay: typeof fetch;
     const pendingSignals: AbortSignal[] = [];
     const fixture = setup({
       getLimits: () => ({ ...REPLAY_RECORDING_LIMITS, maxBufferBytes: 1_000 }),
@@ -218,7 +224,7 @@ describe("createReplayUploader", () => {
         return Response.json({ ...body, limits: { ...body.limits, maxBufferBytes: 1_000 } }, { status: response.status });
       }) as typeof fetch,
     });
-    relay = fixture.browser.fetch;
+    const relay: typeof fetch = fixture.browser.fetch;
     let maximum = 0;
     fixture.uploader.subscribe(() => {
       maximum = Math.max(maximum, fixture.uploader.getState().bufferedBytes);
@@ -250,7 +256,6 @@ describe("createReplayUploader", () => {
   });
 
   it("does not adopt another producer's sequence on the first registration acknowledgment", async () => {
-    let relay: typeof fetch;
     const fixture = setup({
       fetch: (async (url, init) => {
         const response = await relay(url, init);
@@ -260,7 +265,7 @@ describe("createReplayUploader", () => {
         return response;
       }) as typeof fetch,
     });
-    relay = fixture.browser.fetch;
+    const relay: typeof fetch = fixture.browser.fetch;
     fixture.uploader.push(meta(), 1);
     fixture.uploader.push(full(), 1);
     await flush(5_000);
@@ -511,6 +516,293 @@ describe("createReplayUploader", () => {
     const [, init] = fetchSpy.mock.calls.at(-1)!;
     expect(init).toMatchObject({ keepalive: true });
     expect(JSON.parse(String(init!.body))).toMatchObject({ final: true, sequence: 1 });
+  });
+
+  it("continues an acknowledged clean reload under the same recording with a fresh snapshot", async () => {
+    const original = setup();
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const reference = original.uploader.getRecordingReference()!;
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    expect(checkpoint).toMatchObject({
+      recordingId: reference.recordingId, startedAt: T0, nextSequence: 1,
+      snapshotReceived: true, lastAcknowledgment: { sequence: 0, nextSequence: 1, delivery: "accepted" },
+    });
+    expect(JSON.stringify(checkpoint)).not.toMatch(/"recordingToken"|"events"|"visitor"|"subjectId"/);
+    expect(replayUploadCheckpointSchema.safeParse({ ...checkpoint, recordingToken: "forbidden" }).success).toBe(false);
+    expect(replayUploadCheckpointSchema.safeParse({ ...checkpoint, nextSequence: 10 }).success).toBe(false);
+    expect(original.uploader.commitHandoff()).toBe(true);
+    original.uploader.flushOnPageHide();
+    original.uploader.push(incremental(Date.now()), 1);
+    expect(original.fixture.recordings()[0]!.status).toBe("open");
+
+    const successor = setup({
+      fetch: original.fetchSpy,
+      getRoute: () => "/new-route",
+      getViewport: () => ({ width: 800, height: 600 }),
+    });
+    const resumed = successor.uploader.resumeFromCheckpoint(checkpoint, 1, { deadline: Date.now() + 15_000 });
+    expect(successor.uploader.getRecordingReference()).toBeNull();
+    await flush(0);
+    expect(await resumed).toBe(true);
+    expect(successor.uploader.getRecordingReference()).toEqual(reference);
+    expect(successor.uploader.getProgress()).toMatchObject({ continuity: "resuming", snapshotReceived: false });
+    expect(original.bodies().filter(({ url }) => url.endsWith("/recordings")).map(({ body }) => body))
+      .toEqual([checkpoint.registration, checkpoint.registration]);
+    expect(original.browser.log.filter((entry) => entry.path === "/identity")).toHaveLength(2);
+
+    successor.uploader.push(meta(Date.now()), 1);
+    successor.uploader.push(full(Date.now() + 1), 1);
+    await flush(5_000);
+    expect(original.fixture.recordings()).toHaveLength(1);
+    expect(original.batches()).toEqual([
+      expect.objectContaining({ recordingId: reference.recordingId, sequence: 0, final: false }),
+      expect.objectContaining({ recordingId: reference.recordingId, sequence: 1, firstEventTypes: [4, 2], final: false }),
+    ]);
+    expect(successor.uploader.getProgress()).toMatchObject({ continuity: "resumed", snapshotReceived: true });
+    await flush(1); // The receipt wake task must settle before a new clean frontier exists.
+    expect(successor.uploader.getCheckpoint()).toMatchObject({ nextSequence: 2, startedAt: T0 });
+    successor.uploader.dispose();
+    original.uploader.dispose();
+  });
+
+  it.each(["higher", "lower", "different_id", "different_start", "changed_limits", "closed"] as const)(
+    "rejects a clean resume acknowledgment with %s without adopting a server cursor",
+    async (mismatch) => {
+      const original = setup();
+      original.uploader.push(meta(), 1);
+      original.uploader.push(full(), 1);
+      await flush(5_000);
+      const checkpoint = original.uploader.quiesceForHandoff()!;
+      original.uploader.commitHandoff();
+      const resumedFetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        const response = await original.browser.fetch(url, init);
+        if (!String(url).endsWith("/recordings")) return response;
+        if (mismatch === "closed") return Response.json({ contractVersion: 1, error: "Closed", code: "recording_closed" }, { status: 409 });
+        const body = await response.json();
+        return Response.json({ ...body,
+          ...(mismatch === "higher" ? { nextSequence: checkpoint.nextSequence + 1 } : {}),
+          ...(mismatch === "lower" ? { nextSequence: checkpoint.nextSequence - 1 } : {}),
+          ...(mismatch === "different_id" ? { recordingId: crypto.randomUUID() } : {}),
+          ...(mismatch === "different_start" ? { startedAt: checkpoint.startedAt + 1 } : {}),
+          ...(mismatch === "changed_limits" ? { limits: { ...body.limits, maxBatchBytes: 2_048 } } : {}),
+        });
+      });
+      const successor = setup({ fetch: resumedFetch });
+      const result = successor.uploader.resumeFromCheckpoint(checkpoint);
+      await flush(0);
+      expect(await result).toBe(false);
+      expect(successor.uploader.getRecordingReference()).toBeNull();
+      expect(successor.lost).not.toHaveBeenCalled(); // Root owns the one-shot fallback budget.
+      successor.uploader.push(meta(Date.now()), 1);
+      successor.uploader.push(full(Date.now() + 1), 1);
+      await flush(10_000);
+      expect(original.batches()).toHaveLength(1);
+      expect(resumedFetch.mock.calls.filter(([url]) => String(url).endsWith("/recordings"))).toHaveLength(1);
+      successor.uploader.dispose();
+      original.uploader.dispose();
+    },
+  );
+
+  it("checkpoints negotiated recording limits rather than the runtime policy limits", async () => {
+    const original = setup({ mode: "tiny_batch" });
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    expect(checkpoint.limits).toEqual({ ...REPLAY_RECORDING_LIMITS, maxBatchBytes: 2_048 });
+    expect(replayUploadCheckpointSchema.safeParse({ ...checkpoint, limits: { ...checkpoint.limits, unknown: true } }).success).toBe(false);
+    original.uploader.commitHandoff();
+    const successor = setup({ fetch: original.browser.fetch });
+    const resumed = successor.uploader.resumeFromCheckpoint(checkpoint);
+    await flush(0);
+    expect(await resumed).toBe(true);
+    successor.uploader.push(meta(Date.now()), 1);
+    successor.uploader.push(full(Date.now() + 1), 1);
+    await flush(5_000);
+    expect(successor.uploader.quiesceForHandoff()!.limits).toEqual(checkpoint.limits);
+    successor.uploader.dispose();
+    original.uploader.dispose();
+  });
+
+  it("does not checkpoint queued, unacknowledged or unsettled work, and preserves fallback finalization", async () => {
+    const original = setup();
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    expect(original.uploader.getCheckpoint()).toBeNull();
+    let inspectedContinuation = false;
+    original.uploader.subscribe(() => {
+      if (!inspectedContinuation && original.uploader.getProgress().snapshotReceived) {
+        inspectedContinuation = true;
+        expect(original.uploader.quiesceForHandoff()).toBeNull();
+      }
+    });
+    await flush(5_000);
+    expect(inspectedContinuation).toBe(true);
+    expect(original.uploader.getCheckpoint()).not.toBeNull();
+    original.uploader.push(incremental(Date.now()), 1);
+    expect(original.uploader.quiesceForHandoff()).toBeNull();
+    expect(original.uploader.getState().bufferedEvents).toBe(1);
+    await flush(5_000);
+    expect(original.uploader.quiesceForHandoff()).not.toBeNull();
+    // Metadata persistence failed: the old bounded final behavior is retained.
+    original.uploader.flushOnPageHide();
+    await flush(0);
+    expect(original.batches().at(-1)).toMatchObject({ final: true });
+    expect(original.uploader.getCheckpoint()).toBeNull();
+    original.uploader.dispose();
+  });
+
+  it("cannot checkpoint accepted data whose acknowledgment was lost", async () => {
+    const original = setup({ fetch: (async (url, init) => {
+      const response = await relay(url, init);
+      if (String(url).endsWith("/batches")) throw new TypeError("lost acknowledgment");
+      return response;
+    }) as typeof fetch });
+    const relay: typeof fetch = original.browser.fetch;
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    expect(original.fixture.recordings()[0]!.nextSequence).toBe(1);
+    expect(original.uploader.quiesceForHandoff()).toBeNull();
+    expect(original.uploader.getProgress().snapshotReceived).toBe(false);
+    expect(original.uploader.getState().bufferedEvents).toBe(2);
+    original.uploader.dispose();
+  });
+
+  it("bounds and cancels resume identity work without admitting recorder events", async () => {
+    const original = setup();
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    original.uploader.commitHandoff();
+    const signals: AbortSignal[] = [];
+    const successor = setup({ fetch: ((_url, init) => new Promise<Response>((_resolve, reject) => {
+      signals.push(init!.signal!);
+      init!.signal!.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    })) as typeof fetch });
+    const result = successor.uploader.resumeFromCheckpoint(checkpoint, 1, { deadline: Date.now() + 100 });
+    successor.uploader.push(meta(Date.now()), 1);
+    successor.uploader.push(full(Date.now() + 1), 1);
+    expect(successor.uploader.getState().bufferedEvents).toBe(0);
+    await flush(100);
+    expect(await result).toBe(false);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(successor.uploader.getCheckpoint()).toBeNull();
+    successor.uploader.dispose();
+    original.uploader.dispose();
+  });
+
+  it("acquires cooperative intent and recording ownership before registration and upload", async () => {
+    let releaseIntent!: (value: boolean) => void;
+    let releaseRecording!: (value: boolean) => void;
+    const ended = vi.fn();
+    const original = setup({
+      beforeRegistration: () => new Promise<boolean>((resolve) => { releaseIntent = resolve; }),
+      acquireOwnership: () => new Promise<boolean>((resolve) => { releaseRecording = resolve; }),
+      onRecordingEnded: ended,
+    });
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(0);
+    expect(original.fixture.recordings()).toHaveLength(0);
+    releaseIntent(true);
+    await flush(0);
+    expect(original.fixture.recordings()).toHaveLength(1);
+    expect(original.uploader.getRecordingReference()).toBeNull();
+    expect(original.batches()).toHaveLength(0);
+    releaseRecording(true);
+    await flush(5_000);
+    expect(original.batches()).toHaveLength(1);
+    original.uploader.dispose();
+    await flush(0);
+    expect(ended).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases an acquired recording lease even when cancelled before reference binding", async () => {
+    const ended = vi.fn();
+    let acquiredId: string | undefined;
+    let finish!: (value: boolean) => void;
+    const original = setup({
+      acquireOwnership: (_intent, id) => { acquiredId = id; return new Promise<boolean>((resolve) => { finish = resolve; }); },
+      onRecordingEnded: ended,
+    });
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(0);
+    expect(acquiredId).toBeTruthy();
+    expect(original.uploader.getRecordingReference()).toBeNull();
+    original.uploader.clear();
+    finish(true);
+    await flush(0);
+    expect(ended).toHaveBeenCalledWith(expect.anything(), acquiredId);
+    expect(original.batches()).toHaveLength(0);
+    original.uploader.dispose();
+  });
+
+  it("keeps resumed ownership until an aborted request actually settles", async () => {
+    const original = setup();
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    original.uploader.commitHandoff();
+    let finishRequest!: (response: Response) => void;
+    const ended = vi.fn();
+    const successor = setup({
+      fetch: () => new Promise<Response>((resolve) => { finishRequest = resolve; }),
+      onRecordingEnded: ended,
+    });
+    const controller = new AbortController();
+    const resumed = successor.uploader.resumeFromCheckpoint(checkpoint, 1, { signal: controller.signal });
+    controller.abort();
+    expect(await resumed).toBe(false);
+    expect(successor.uploader.hasPendingWork()).toBe(true);
+    expect(ended).not.toHaveBeenCalled();
+    finishRequest(Response.json({ contractVersion: 1 }));
+    await flush(0);
+    expect(successor.uploader.hasPendingWork()).toBe(false);
+    expect(ended).toHaveBeenCalledWith(expect.anything(), checkpoint.recordingId);
+    successor.uploader.dispose();
+    original.uploader.dispose();
+  });
+
+  it("serializes recorder emissions between ownership resolution and registration continuation", async () => {
+    let intents = 0;
+    let bindings = 0;
+    const emitBetweenContinuations = () => {
+      // Run after own() clears its transport busy flag but before its awaiting
+      // register() continuation. The whole operation must still own the pump.
+      queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+        fixture.uploader.push(incremental(Date.now()), 1);
+      })));
+    };
+    const fixture: ReturnType<typeof setup> = setup({
+      beforeRegistration: async () => {
+        intents++;
+        await Promise.resolve();
+        if (intents === 1) emitBetweenContinuations();
+        return true;
+      },
+      acquireOwnership: async () => {
+        bindings++;
+        await Promise.resolve();
+        if (bindings === 1) emitBetweenContinuations();
+        return true;
+      },
+    });
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(), 1);
+    await flush(5_000);
+    expect(intents).toBe(1);
+    expect(bindings).toBe(1);
+    expect(fixture.browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(1);
+    expect(fixture.browser.maxInFlight()).toBe(1);
+    expect(fixture.uploader.getState()).toMatchObject({ status: "pending", bufferedEvents: 0 });
+    expect(fixture.batches()[0]).toMatchObject({ eventCount: 4, firstEventTypes: [4, 2] });
+    fixture.uploader.dispose();
   });
 
   it("never throws into callers and keeps a stable state snapshot", async () => {

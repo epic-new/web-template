@@ -9,6 +9,8 @@ import type { PublicReplayConfig } from "./replay-config.contract";
 import type { ReplayConsentSource } from "./replay-consent";
 import { replayLifecycle } from "./replay-lifecycle";
 import type { ReplaySampler } from "./replay-sampling";
+import { createReplayRecoveryBudget, type ReplayRecoveryBudget } from "./replay-runtime-policy";
+import type { ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
 import {
   createReplayUploader,
   type ReplayRecordingReference,
@@ -40,6 +42,9 @@ export interface ReplayRecordingPipelineOptions
   sampler?: ReplaySampler;
   record?: typeof rrwebRecord;
   getPathname?: () => string;
+  getCaptureAllowed?: () => boolean;
+  recoveryBudget?: ReplayRecoveryBudget;
+  managePageHide?: boolean;
 }
 
 export function createReplayRecordingPipeline({
@@ -49,12 +54,15 @@ export function createReplayRecordingPipeline({
   sampler,
   record,
   getPathname,
+  getCaptureAllowed,
+  recoveryBudget = createReplayRecoveryBudget(),
+  managePageHide = true,
   ...uploaderOptions
 }: ReplayRecordingPipelineOptions = {}) {
-  let restarts = 0;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let pagehideAttached = false;
   let started = false;
+  let captureFailureHandled = false;
 
   const uploader = createReplayUploader({
     ...uploaderOptions,
@@ -62,16 +70,16 @@ export function createReplayRecordingPipeline({
     getLimits: () => getPolicy().recording.limits,
     getConfigVersion: () => getPolicy().configVersion,
     onRecordingLost: () => {
-      if (restarts >= getPolicy().recording.limits.maxAttempts) {
+      if (!recoveryBudget.take(getPolicy().recording.limits.maxAttempts)) {
         uploader.halt();
         return;
       }
-      restarts++;
       // Out of the recorder's emit and the transport's own call stack.
       clearTimeout(restartTimer);
       restartTimer = setTimeout(() => {
-        restartTimer = undefined;
         session.restartBoundary();
+        restartTimer = undefined;
+        changed();
       }, 0);
     },
   });
@@ -82,6 +90,7 @@ export function createReplayRecordingPipeline({
   if (sampler) captureOptions.sampler = sampler;
   if (record) captureOptions.record = record;
   if (getPathname) captureOptions.getPathname = getPathname;
+  if (getCaptureAllowed) captureOptions.getCaptureAllowed = getCaptureAllowed;
   const session = createReplayCaptureSession(captureOptions);
 
   let state: ReplayPipelineState = { capture: session.getState(), upload: uploader.getState() };
@@ -92,8 +101,21 @@ export function createReplayRecordingPipeline({
     state = next;
     for (const listener of [...listeners]) listener();
   }
-  session.subscribe(changed);
+  session.subscribe(() => {
+    if (session.hasFailed() && !captureFailureHandled) {
+      captureFailureHandled = true;
+      started = false;
+      uploader.clear();
+      session.dispose();
+      if (pagehideAttached && typeof window !== "undefined") window.removeEventListener("pagehide", onPageHide);
+      pagehideAttached = false;
+    }
+    changed();
+  });
   uploader.subscribe(() => {
+    const progress = uploader.getProgress();
+    const reference = uploader.getRecordingReference();
+    if (reference) recoveryBudget.acknowledged(reference.recordingId, progress.acceptedBatches, progress.postOpeningBatches, uploaderOptions.monotonicNow?.() ?? performance.now());
     if (uploader.getState().status === "unavailable" && restartTimer === undefined) {
       started = false;
       // The upload outcome/history remains visible; stopping rrweb must not
@@ -108,17 +130,56 @@ export function createReplayRecordingPipeline({
   const onPageHide = () => uploader.flushOnPageHide();
 
   return {
-    start(): void {
+    start({ explicit = true }: { explicit?: boolean } = {}): void {
       if (started) return;
       started = true;
-      restarts = 0;
+      captureFailureHandled = false;
+      if (explicit) recoveryBudget.reset();
       uploader.resume();
+      session.refresh();
       session.start();
-      if (started && !pagehideAttached && typeof window !== "undefined") {
+      if (managePageHide && started && !pagehideAttached && typeof window !== "undefined") {
         window.addEventListener("pagehide", onPageHide);
         pagehideAttached = true;
       }
       changed();
+    },
+
+    rotate(): void { session.restartBoundary(); },
+
+    refresh(): void { session.refresh(); },
+
+    /** Detach capture before checking the frontier; do not clear retained data. */
+    stopCapture(): void {
+      started = false;
+      clearTimeout(restartTimer);
+      restartTimer = undefined;
+      session.dispose();
+      if (pagehideAttached) window.removeEventListener("pagehide", onPageHide);
+      pagehideAttached = false;
+    },
+
+    getCheckpoint() { return uploader.getCheckpoint(); },
+    getProgress() { return uploader.getProgress(); },
+    isRecovering() { return restartTimer !== undefined; },
+    hasPendingWork() { return uploader.hasPendingWork(); },
+    hasCaptureFailure() { return session.hasFailed(); },
+    quiesceForHandoff() {
+      this.stopCapture();
+      return uploader.quiesceForHandoff();
+    },
+    commitHandoff(): void { uploader.commitHandoff(); changed(); },
+    flushOnPageHide(): void { uploader.flushOnPageHide(); },
+    async resumeFromCheckpoint(checkpoint: ReplayUploadCheckpoint, options: { signal?: AbortSignal; deadline?: number } = {}): Promise<boolean> {
+      const restored = await uploader.resumeFromCheckpoint(checkpoint, session.getState().boundary + 1, options);
+      if (!restored || options.signal?.aborted || getCaptureAllowed?.() === false) {
+        session.retireUnstartedBoundary();
+        return false;
+      }
+      started = true;
+      session.start();
+      changed();
+      return true;
     },
 
     /** Stops capture and drops queued local data; history and the restart budget stay. */

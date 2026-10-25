@@ -33,7 +33,8 @@ const SECRETS = [
 function setup({
   policy = activeReplayPolicy(),
   record = rrwebRecord,
-}: { policy?: PublicReplayConfig; record?: typeof rrwebRecord } = {}) {
+  getCaptureAllowed,
+}: { policy?: PublicReplayConfig; record?: typeof rrwebRecord; getCaptureAllowed?: () => boolean } = {}) {
   let current = policy;
   const policyListeners = new Set<() => void>();
   const buffer = createReplayMemoryBuffer(REPLAY_RECORDING_LIMITS);
@@ -46,6 +47,7 @@ function setup({
     },
     sampler: always,
     record,
+    getCaptureAllowed,
   });
   return {
     buffer,
@@ -64,7 +66,7 @@ function fakeRecord() {
   const record = vi.fn((options?: { emit?: (event: eventWithTime) => void }) => {
     emit = options?.emit;
     emit?.({ type: EventType.Meta, timestamp: 1, data: { href: location.href, width: 1, height: 1 } } as eventWithTime);
-    emit?.({ type: EventType.FullSnapshot, timestamp: 2, data: {} } as unknown as eventWithTime);
+    emit?.({ type: EventType.FullSnapshot, timestamp: 2, data: { node: { type: 0, id: 1, childNodes: [] } } } as unknown as eventWithTime);
     return stop;
   }) as unknown as typeof rrwebRecord;
   return {
@@ -89,6 +91,8 @@ describe("createReplayCaptureSession", () => {
     dispose?.();
     dispose = undefined;
     epicReplayConsent.reset();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
     document.body.innerHTML = "";
   });
 
@@ -151,6 +155,89 @@ describe("createReplayCaptureSession", () => {
   });
 
   describe("real recorder regressions", () => {
+    it("defers loading-document capture so lifecycle events cannot precede its opening Meta/FullSnapshot", async () => {
+      let readiness: DocumentReadyState = "loading";
+      vi.spyOn(document, "readyState", "get").mockImplementation(() => readiness);
+      const raw: eventWithTime[] = [];
+      const stopRaw = rrwebRecord({ emit: (event) => raw.push(event) });
+      try {
+        expect(raw).toEqual([]);
+        readiness = "interactive";
+        document.dispatchEvent(new Event("DOMContentLoaded"));
+        readiness = "complete";
+        window.dispatchEvent(new Event("load"));
+        // This is the installed real 2.2.0 recorder, not an ideal event mock.
+        expect(raw.slice(0, 4).map((event) => event.type)).toEqual([
+          EventType.DomContentLoaded, EventType.Load, EventType.Meta, EventType.FullSnapshot,
+        ]);
+      } finally {
+        stopRaw?.();
+      }
+
+      readiness = "loading";
+      const initialized = vi.fn();
+      let actualMetaTimestamp: number | undefined;
+      const realRecorder = ((options?: Parameters<typeof rrwebRecord<eventWithTime>>[0]) => {
+        initialized();
+        return rrwebRecord<eventWithTime>({ ...options, emit: (event, checkout) => {
+          if (event.type === EventType.Meta) actualMetaTimestamp = event.timestamp;
+          options?.emit?.(event, checkout);
+        } });
+      }) as unknown as typeof rrwebRecord;
+      const { session, buffer } = setup({ record: realRecorder });
+      dispose = session.dispose;
+      epicReplayConsent.grant();
+      session.start();
+      expect(initialized).not.toHaveBeenCalled();
+      expect(session.getState().reason).toBe("document_loading");
+      readiness = "interactive";
+      document.dispatchEvent(new Event("DOMContentLoaded"));
+      expect(initialized).not.toHaveBeenCalled();
+      readiness = "complete";
+      window.dispatchEvent(new Event("load"));
+      await flush();
+      expect(initialized).toHaveBeenCalledTimes(1);
+      expect(buffer.events().slice(0, 2).map(({ event }) => event.type)).toEqual([
+        EventType.Meta, EventType.FullSnapshot,
+      ]);
+      expect(buffer.events()[0]!.event.timestamp).toBe(actualMetaTimestamp);
+      expect(buffer.events().some(({ event }) => event.type === EventType.DomContentLoaded || event.type === EventType.Load)).toBe(false);
+    });
+
+    it.each([
+      ["loading", "dispose"], ["loading", "withdraw"], ["loading", "excluded"],
+      ["loading", "expired"], ["loading", "identity"],
+      ["deferred", "dispose"], ["deferred", "withdraw"], ["deferred", "excluded"],
+      ["deferred", "expired"], ["deferred", "identity"],
+    ] as const)("cancels a real-recorder %s readiness wait on %s", async (phase, cancellation) => {
+      let readiness: DocumentReadyState = "loading";
+      let identityReady = true;
+      vi.spyOn(document, "readyState", "get").mockImplementation(() => readiness);
+      const realRecorder = vi.fn((options) => rrwebRecord(options)) as unknown as typeof rrwebRecord;
+      const { session, buffer, setPolicy } = setup({ record: realRecorder, getCaptureAllowed: () => identityReady });
+      dispose = session.dispose;
+      epicReplayConsent.grant();
+      session.start();
+      if (phase === "deferred") {
+        readiness = "interactive";
+        document.dispatchEvent(new Event("DOMContentLoaded"));
+      }
+      switch (cancellation) {
+        case "dispose": session.dispose(); break;
+        case "withdraw": epicReplayConsent.withdraw(); break;
+        case "excluded": window.history.pushState({}, "", "/excluded"); break;
+        case "expired": setPolicy(disabledReplayConfig({ reason: "expired", environment: "development", release: null, now: 0 })); break;
+        case "identity": identityReady = false; session.refresh(); break;
+      }
+      readiness = "complete";
+      document.dispatchEvent(new Event("DOMContentLoaded"));
+      window.dispatchEvent(new Event("load"));
+      await flush();
+      expect(realRecorder).not.toHaveBeenCalled();
+      expect(buffer.events()).toEqual([]);
+      expect(session.getState().status).toBe("blocked");
+    });
+
     it("masks hidden and password values changed through setAttribute after recording starts", async () => {
       document.body.insertAdjacentHTML(
         "beforeend",
@@ -235,6 +322,88 @@ describe("createReplayCaptureSession", () => {
       expect(getComputedStyle(document.getElementById("styled")!).color).toBe("rgb(255, 0, 0)");
       document.head.innerHTML = "";
     });
+  });
+
+  it("uses the same cancellable readiness gate when restarting a boundary", async () => {
+    let readiness: DocumentReadyState = "complete";
+    vi.spyOn(document, "readyState", "get").mockImplementation(() => readiness);
+    const fake = fakeRecord();
+    const { session, buffer } = setup({ record: fake.record });
+    dispose = session.dispose;
+    epicReplayConsent.grant();
+    session.start();
+    readiness = "loading";
+    session.restartBoundary();
+    expect(fake.stop).toHaveBeenCalledTimes(1);
+    expect(fake.record).toHaveBeenCalledTimes(1);
+    readiness = "interactive";
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    expect(fake.record).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(fake.record).toHaveBeenCalledTimes(2);
+    expect(buffer.events().filter(({ boundary }) => boundary === 2).map(({ event }) => event.type)).toEqual([
+      EventType.Meta, EventType.FullSnapshot,
+    ]);
+  });
+
+  it.each(["lifecycle_first", "incremental_second", "invalid_snapshot", "invalid_root"] as const)(
+    "rejects %s without forwarding a partial opening pair",
+    (failure) => {
+      const stop = vi.fn();
+      const record = vi.fn((options?: { emit?: (event: eventWithTime) => void }) => {
+        if (failure === "lifecycle_first") {
+          options?.emit?.({ type: EventType.Load, timestamp: 1, data: {} });
+        } else {
+          options?.emit?.({ type: EventType.Meta, timestamp: 1, data: { href: location.href, width: 1, height: 1 } });
+          options?.emit?.({
+            type: failure === "incremental_second" ? EventType.IncrementalSnapshot : EventType.FullSnapshot,
+            timestamp: 2, data: failure === "invalid_root" ? { node: {} } : {},
+          } as unknown as eventWithTime);
+        }
+        return stop;
+      }) as unknown as typeof rrwebRecord;
+      const { session, buffer } = setup({ record });
+      dispose = session.dispose;
+      epicReplayConsent.grant();
+      session.start();
+      expect(buffer.events()).toEqual([]);
+      expect(session.getState().status).toBe("blocked");
+      expect(stop).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("bounds incomplete opening snapshot staging by age", async () => {
+    vi.useFakeTimers();
+    const stop = vi.fn();
+    const record = vi.fn((options?: { emit?: (event: eventWithTime) => void }) => {
+      options?.emit?.({ type: EventType.Meta, timestamp: 1, data: { href: location.href, width: 1, height: 1 } });
+      return stop;
+    }) as unknown as typeof rrwebRecord;
+    const policy = activeReplayPolicy();
+    policy.recording.limits.maxBufferAgeMs = 10;
+    const { session, buffer } = setup({ policy, record });
+    dispose = session.dispose;
+    epicReplayConsent.grant();
+    session.start();
+    expect(session.getState().reason).toBe("opening_snapshot");
+    expect(buffer.events()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(session.getState().reason).toBe("policy_disabled");
+    expect(buffer.events()).toEqual([]);
+  });
+
+  it("rejects an oversized opening before either event reaches the sink", () => {
+    const fake = fakeRecord();
+    const policy = activeReplayPolicy();
+    policy.recording.limits.maxBufferBytes = 64;
+    const { session, buffer } = setup({ policy, record: fake.record });
+    dispose = session.dispose;
+    epicReplayConsent.grant();
+    session.start();
+    expect(fake.stop).toHaveBeenCalledOnce();
+    expect(session.getState().status).toBe("blocked");
+    expect(buffer.events()).toEqual([]);
   });
 
   it("keeps an excluded route's content out and resumes with a fresh boundary", async () => {

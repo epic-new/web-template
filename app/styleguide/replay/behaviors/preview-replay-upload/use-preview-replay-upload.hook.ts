@@ -1,10 +1,17 @@
 "use client";
 
 import { record } from "@rrweb/record";
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import type { PublicReplayConfig } from "@/lib/replay/replay-config.contract";
 import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
+import { epicReplayConsent } from "@/lib/replay/replay-consent";
+import { replayDocumentOwners } from "@/lib/replay/replay-document-owner";
+import { createReplayIdentity, subscribeReplayIdentityBoundary } from "@/lib/replay/replay-identity";
+import { evaluateCapturePermission } from "@/lib/replay/replay-permission";
+import { createReplaySampler } from "@/lib/replay/replay-sampling";
+import type { EpicReplaySnapshot, ReplayRootRuntime } from "@/lib/replay/replay-root-runtime";
+import { useEpicReplay, useEpicReplayDiagnostics, useEpicReplayRuntime } from "@/shared/hooks/use-epic-replay.hook";
 import {
   createReplayRecordingPipeline,
   type ReplayPipelineState,
@@ -19,10 +26,8 @@ import { createHarnessFixture, type SyntheticFixtureMode } from "./synthetic-epi
  * redaction feeding this issue's real upload transport, pointed at one of two
  * labelled targets:
  *
- * - "application": the real same-origin relay routes. When the deployment's
- *   own policy is inactive (e.g. `EPIC_*` unset) the harness gates capture
- *   with its synthetic development policy instead, so the relay's honest
- *   answer (`not_configured`) is what the transport reports.
+ * - "application": the existing root lifecycle, with its real policy and
+ *   identity gates. An inactive deployment never falls back to synthetic policy.
  * - "synthetic": the in-browser synthetic EPI-210 fixture (not Epic, not rrweb).
  *
  * Module-level so it survives client navigation between the harness pages;
@@ -60,9 +65,13 @@ export interface ReplayUploadHarnessSnapshot {
   pipeline: ReplayPipelineState;
   log: readonly ReplayHarnessLogEntry[];
   forged: readonly ReplayForgedResult[];
+  provider?: EpicReplaySnapshot;
+  eligibleHandoff?: boolean;
+  recoveryDebt?: number;
 }
 
 const BASE_URL = "/api/epic/replay";
+const sampler = createReplaySampler({ storage: null });
 
 let target: ReplayUploadTarget = "application";
 let running = false;
@@ -76,6 +85,15 @@ let customCounter = 0;
 const listeners = new Set<() => void>();
 const policyListeners = new Set<() => void>();
 let unsubscribeFixture: (() => void) | null = null;
+let unsubscribePipeline: (() => void) | null = null;
+let releaseOwner: (() => void) | null = null;
+let bootstrap: AbortController | null = null;
+let identityReady = false;
+let bootstrapFailed = false;
+let explicitStartRequested = false;
+const identityTransitions = new Set<number>();
+let unsubscribeIdentity: (() => void) | null = null;
+let syntheticIdentity = createReplayIdentity({ fetch: (input, init) => harness.browser.fetch(input, init) });
 
 function syntheticPolicy(): PublicReplayConfig {
   if (!harnessPolicy || Date.now() >= harnessPolicy.expiresAt) {
@@ -85,7 +103,7 @@ function syntheticPolicy(): PublicReplayConfig {
 }
 
 function policySource(): "application" | "harness" {
-  return target === "application" && replayLifecycle.getSnapshot().status === "active" ? "application" : "harness";
+  return target === "application" ? "application" : "harness";
 }
 
 function getPolicy(): PublicReplayConfig {
@@ -147,8 +165,10 @@ function targetFetch(): typeof fetch {
 
 function getPipeline(): ReplayRecordingPipeline {
   if (pipeline) return pipeline;
+  if (target !== "synthetic") throw new Error("Application capture belongs to the root provider");
   const created = createReplayRecordingPipeline({
     getPolicy,
+    sampler,
     subscribePolicy: (listener) => {
       const unsubscribe = replayLifecycle.subscribe(listener);
       policyListeners.add(listener);
@@ -157,7 +177,8 @@ function getPipeline(): ReplayRecordingPipeline {
         policyListeners.delete(listener);
       };
     },
-    fetch: targetFetch(),
+    fetch: harness.browser.fetch,
+    getCaptureAllowed: () => identityReady && identityTransitions.size === 0 && releaseOwner !== null && target === "synthetic" && running,
     baseUrl: BASE_URL,
     // The harness has no build-bound release of its own: unknown, never the server's.
     getDocumentRelease: () => null,
@@ -165,7 +186,7 @@ function getPipeline(): ReplayRecordingPipeline {
       (typeof navigator === "undefined" || navigator.onLine !== false) &&
       !(target === "synthetic" && harness.fixture.getMode() === "offline"),
   });
-  created.subscribe(emit);
+  unsubscribePipeline = created.subscribe(emit);
   pipeline = created;
   return created;
 }
@@ -189,7 +210,9 @@ function build(): ReplayUploadHarnessSnapshot {
     fixtureMode: harness.fixture.getMode(),
     running,
     policySource: policySource(),
-    pipeline: pipeline?.getState() ?? idleState,
+    pipeline: pipeline?.getState() ?? (bootstrapFailed ? {
+      ...idleState, upload: { ...idleState.upload, status: "unavailable", reason: harness.fixture.getMode() === "offline" ? "offline" : "identity_required" },
+    } : idleState),
     log: target === "synthetic" ? harness.browser.log.map((entry) => ({ ...entry })) : appLog,
     forged,
   };
@@ -229,10 +252,20 @@ attachFixture();
 
 function setTarget(next: ReplayUploadTarget) {
   if (next === target) return;
+  bootstrap?.abort();
+  bootstrap = null;
+  identityReady = false;
+  bootstrapFailed = false;
+  explicitStartRequested = false;
+  unsubscribePipeline?.();
+  unsubscribePipeline = null;
   pipeline?.dispose();
   pipeline = null;
   running = false;
   target = next;
+  releaseOwner?.();
+  releaseOwner = null;
+  if (next === "synthetic" && mounted > 0) acquireHarness();
   forged = [];
   for (const listener of [...policyListeners]) listener();
   emit();
@@ -243,14 +276,66 @@ function setFixtureMode(mode: SyntheticFixtureMode) {
   emit();
 }
 
-function start() {
+function acquireHarness() {
+  if (releaseOwner) return;
+  releaseOwner = replayDocumentOwners().acquire("harness", () => {
+    releaseOwner = null;
+    running = false;
+    bootstrap?.abort(); bootstrap = null;
+    identityReady = false;
+    pipeline?.stop();
+    emit();
+  });
+}
+
+function permitted() {
+  const policy = getPolicy();
+  return evaluateCapturePermission({ policy, consent: epicReplayConsent.getSnapshot(), pathname: window.location.pathname,
+    sampled: () => sampler.decide({ configVersion: policy.configVersion, sessionSampleRate: policy.capture.sessionSampleRate }) }).allowed;
+}
+
+function reconcileSynthetic() {
+  if (target !== "synthetic" || !running || !releaseOwner || identityTransitions.size > 0) return;
+  if (!permitted()) {
+    bootstrap?.abort(); bootstrap = null;
+    identityReady = false;
+    pipeline?.stop();
+    emit();
+    return;
+  }
+  if (identityReady) { pipeline?.refresh(); return; }
+  if (bootstrap) return;
+  const controller = new AbortController();
+  bootstrap = controller;
+  void syntheticIdentity.acknowledge({ signal: controller.signal }).then((accepted) => {
+    if (controller.signal.aborted || bootstrap !== controller || !releaseOwner || !running || target !== "synthetic" || !permitted()) return;
+    bootstrap = null;
+    identityReady = accepted;
+    bootstrapFailed = !accepted;
+    if (accepted) {
+      getPipeline().start({ explicit: explicitStartRequested });
+      explicitStartRequested = false;
+    }
+    else running = false;
+    emit();
+  });
+}
+
+function startSynthetic() {
+  acquireHarness();
   running = true;
-  getPipeline().start();
+  explicitStartRequested = true;
+  bootstrapFailed = false;
+  if (identityReady) { getPipeline().start(); explicitStartRequested = false; }
+  else reconcileSynthetic();
   emit();
 }
 
 function stop() {
   running = false;
+  explicitStartRequested = false;
+  bootstrap?.abort(); bootstrap = null;
+  identityReady = false;
   pipeline?.stop();
   emit();
 }
@@ -340,12 +425,37 @@ function useHarnessLifetime() {
   useEffect(() => {
     mounted++;
     clearTimeout(disposeTimer);
+    if (target === "synthetic") { acquireHarness(); reconcileSynthetic(); }
+    const unsubscribeConsent = epicReplayConsent.subscribe(reconcileSynthetic);
+    if (!unsubscribeIdentity) unsubscribeIdentity = subscribeReplayIdentityBoundary((event) => {
+      if (event.phase === "begin") identityTransitions.add(event.epoch);
+      if (event.phase === "settled") identityTransitions.delete(event.epoch);
+      if (event.phase !== "settled") {
+        bootstrap?.abort(); bootstrap = null;
+        identityReady = false;
+        explicitStartRequested = false;
+        syntheticIdentity.requireReset();
+        pipeline?.stop();
+        emit();
+      }
+      // The cross-tab notification follows the remote authentication settlement.
+      if (event.phase !== "begin" && mounted > 0) reconcileSynthetic();
+    });
     return () => {
-      mounted--;
+      unsubscribeConsent();
+      mounted = Math.max(0, mounted - 1);
+      if (mounted === 0) {
+        unsubscribeIdentity?.(); unsubscribeIdentity = null; identityTransitions.clear();
+        bootstrap?.abort(); bootstrap = null;
+        identityReady = false;
+        pipeline?.stopCapture();
+      }
       disposeTimer = setTimeout(() => {
         if (mounted > 0) return;
+        unsubscribePipeline?.(); unsubscribePipeline = null;
         pipeline?.dispose();
         pipeline = null;
+        releaseOwner?.(); releaseOwner = null;
         running = false;
         emit();
       }, 0);
@@ -353,12 +463,13 @@ function useHarnessLifetime() {
   }, []);
 }
 
-function useControls() {
+function useControls(runtime: ReplayRootRuntime | null) {
   return {
     setTarget: useCallback((next: ReplayUploadTarget) => setTarget(next), []),
     setFixtureMode: useCallback((mode: SyntheticFixtureMode) => setFixtureMode(mode), []),
-    start: useCallback(() => start(), []),
-    stop: useCallback(() => stop(), []),
+    start: useCallback(() => { if (target === "application") runtime?.start(); else startSynthetic(); }, [runtime]),
+    stop: useCallback(() => { if (target === "application") runtime?.stop(); else stop(); }, [runtime]),
+    restart: useCallback(() => { if (target === "application") runtime?.restart(); else { stop(); startSynthetic(); } }, [runtime]),
     emitCustomEvent: useCallback(() => emitCustomEvent(), []),
     sendForgedRequests: useCallback(() => sendForgedRequests(), []),
   };
@@ -367,31 +478,50 @@ function useControls() {
 /** Control components do not subscribe to per-event buffer/readout changes. */
 export function usePreviewReplayUploadControls() {
   useHarnessLifetime();
-  const state = useSyncExternalStore(subscribe, () => controlSnapshot, () => controlSnapshot);
-  return { state, ...useControls() };
+  const local = useSyncExternalStore(subscribe, () => controlSnapshot, () => controlSnapshot);
+  const root = useEpicReplay();
+  const runtime = useEpicReplayRuntime();
+  const state = useMemo(() => local.target === "application" ? { ...local, running: root.status === "capturing" } : local, [local, root.status]);
+  return { state, ...useControls(runtime) };
 }
 
 export function usePreviewReplayUpload() {
   useHarnessLifetime();
 
-  const state = useSyncExternalStore(subscribe, () => snapshot, () => snapshot);
+  const local = useSyncExternalStore(subscribe, () => snapshot, () => snapshot);
+  const root = useEpicReplay();
+  const diagnostics = useEpicReplayDiagnostics();
+  const runtime = useEpicReplayRuntime();
+  const state: ReplayUploadHarnessSnapshot = local.target === "application" ? {
+    ...local, pipeline: diagnostics?.pipeline ?? idleState,
+    running: root.status === "capturing", provider: root,
+    eligibleHandoff: diagnostics?.eligibleHandoff ?? false, recoveryDebt: diagnostics?.recoveryDebt ?? 0,
+  } : local;
 
   return {
     state,
     log: state.log,
-    ...useControls(),
+    ...useControls(runtime),
   };
 }
 
 // Tests only.
 export function resetPreviewReplayUpload() {
   clearTimeout(disposeTimer);
+  bootstrap?.abort(); bootstrap = null;
+  identityReady = false;
+  bootstrapFailed = false;
+  explicitStartRequested = false;
+  unsubscribeIdentity?.(); unsubscribeIdentity = null; identityTransitions.clear();
+  unsubscribePipeline?.(); unsubscribePipeline = null;
   pipeline?.dispose();
+  releaseOwner?.(); releaseOwner = null;
   pipeline = null;
   mounted = 0;
   running = false;
   target = "application";
   harness = createHarnessFixture();
+  syntheticIdentity = createReplayIdentity({ fetch: (input, init) => harness.browser.fetch(input, init) });
   attachFixture();
   harnessPolicy = null;
   appLog = [];

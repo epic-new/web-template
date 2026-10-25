@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 vi.mock("next/navigation", () => ({ redirect: vi.fn() }));
 vi.mock("@/lib/auth", async () => {
@@ -14,6 +14,7 @@ import { getUser } from "@/lib/auth";
 import { PostDB, PreDB } from "@/lib/db-test";
 import { createTestClient, queryWrapper } from "@/shared/tests/test-utils";
 import { useSignup } from "../use-signup.hook";
+import { subscribeReplayIdentityBoundary } from "@/lib/replay/replay-identity";
 
 describe("signup hook scenarios", () => {
   beforeEach(async () => {
@@ -22,6 +23,12 @@ describe("signup hook scenarios", () => {
   });
 
   it("submits valid signup data through the real action", async () => {
+    const phases: string[] = [];
+    onTestFinished(subscribeReplayIdentityBoundary((event) => phases.push(event.phase)));
+    vi.mocked(getUser).mockImplementation(async () => {
+      expect(phases).toEqual(["begin"]);
+      return { user: null } as never;
+    });
     const email = "hook-user@example.com";
     const form = new FormData();
     form.set("email", email);
@@ -33,8 +40,10 @@ describe("signup hook scenarios", () => {
 
     act(() => result.current.formAction(form));
 
+    await waitFor(() => expect(phases).toEqual(["begin", "settled"]));
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.state.error).toBeNull();
+    expect(phases).toEqual(["begin", "settled"]);
     await PostDB(db, schema, {
       user: [{ email, emailVerified: false }],
       account: [{ providerId: "credential" }],
