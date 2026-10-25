@@ -64,13 +64,16 @@ export async function DELETE(request: NextRequest) {
 }
 
 /**
- * The address the platform saw, not one the client wrote: the platform's own
- * header first, then the hop the nearest proxy appended (the rightmost
+ * The address the platform saw, not one the client wrote: on Vercel its own
+ * header; elsewhere the hop the nearest proxy appended (the rightmost
  * `x-forwarded-for` entry) — the first entry is whatever the client sent.
  */
 function clientAddress(request: NextRequest): string | null {
-  const platform = request.headers.get("x-vercel-forwarded-for") ?? request.headers.get("x-real-ip");
+  // Only on Vercel is the platform header guaranteed to be overwritten at the edge.
+  const platform = process.env.VERCEL
+    ? (request.headers.get("x-vercel-forwarded-for") ?? request.headers.get("x-real-ip"))
+    : null;
   if (platform) return platform.split(",")[0]!.trim();
   const hops = request.headers.get("x-forwarded-for")?.split(",").map((hop) => hop.trim()).filter(Boolean);
-  return hops?.at(-1) ?? null;
+  return hops?.at(-1) ?? request.headers.get("x-real-ip");
 }
