@@ -12,6 +12,12 @@ import { createReplayRecoveryBudget, publicDocumentRelease, replayContextFingerp
 import type { ReplayRecordingReference } from "./replay-uploader";
 import type { ReplayFetch } from "./replay-upload-contract";
 import type { ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
+import type { ReplayEvidenceReference } from "./replay-evidence";
+import { parseReplayMarker, sanitizeMarkerRoute, type ReplayMarkerSummary, type ReplayTrackResult } from "./replay-marker.contract";
+import { attachReplayBrowserMarkers } from "./replay-browser-markers";
+import { normalizeReplayPath } from "./replay-routes";
+
+const EMPTY_MARKERS: readonly ReplayMarkerSummary[] = Object.freeze([]);
 
 export interface EpicReplaySnapshot {
   readonly status: "disabled" | "waiting" | "capturing" | "unavailable";
@@ -97,7 +103,13 @@ export function createReplayRootRuntime({
   let state: EpicReplaySnapshot = { ...UNAVAILABLE_REPLAY_SNAPSHOT, reason: "identity_pending", status: "waiting" };
   const listeners = new Set<() => void>();
   const diagnosticListeners = new Set<() => void>();
-  let diagnostics: { pipeline: ReturnType<ReplayRecordingPipeline["getState"]> | null; eligibleHandoff: boolean; recoveryDebt: number } = { pipeline: null, eligibleHandoff: false, recoveryDebt: 0 };
+  let diagnostics: { pipeline: ReturnType<ReplayRecordingPipeline["getState"]> | null; eligibleHandoff: boolean; recoveryDebt: number; markers: readonly ReplayMarkerSummary[] } = { pipeline: null, eligibleHandoff: false, recoveryDebt: 0, markers: EMPTY_MARKERS };
+  const issuedEvidence = new WeakMap<ReplayEvidenceReference, number>();
+  let reportContext = "";
+  const reported = new Set<string>();
+  let screenTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastScreen = "";
+  let emittingMarker = false;
   const leases = new Map<string, ReplayOwnershipLease>();
   const cleanups: (() => void)[] = [];
   if (replayIdentityResetPending()) identity.requireReset();
@@ -126,13 +138,14 @@ export function createReplayRootRuntime({
     handoff.invalidate();
   }
   function diagnosticsChanged() {
-    const next = { pipeline: pipeline?.getState() ?? null, eligibleHandoff: !!prepared, recoveryDebt: budget.debt };
-    if (next.pipeline === diagnostics.pipeline && next.eligibleHandoff === diagnostics.eligibleHandoff && next.recoveryDebt === diagnostics.recoveryDebt) return;
+    const next = { pipeline: pipeline?.getState() ?? null, eligibleHandoff: !!prepared, recoveryDebt: budget.debt, markers: pipeline?.getMarkerSummaries() ?? EMPTY_MARKERS };
+    if (next.pipeline === diagnostics.pipeline && next.eligibleHandoff === diagnostics.eligibleHandoff && next.recoveryDebt === diagnostics.recoveryDebt && next.markers === diagnostics.markers) return;
     diagnostics = next;
     for (const listener of [...diagnosticListeners]) listener();
   }
   function cancel(stop = true) {
     generation++;
+    clearTimeout(screenTimer); screenTimer = undefined;
     pending?.abort(); pending = null;
     startup = false;
     resuming = false;
@@ -183,6 +196,7 @@ export function createReplayRootRuntime({
       reason: pipeline.hasCaptureFailure() ? "recorder_unavailable" : exhausted ? current.upload.reason ?? state.reason : current.capture.reason,
       reference: current.upload.current, snapshotReceived: progress.snapshotReceived, continuity });
     diagnosticsChanged();
+    scheduleScreen();
     const checkpoint = pipeline.getCheckpoint();
     const context = handoffContext();
     const lease = checkpoint && leases.get(replayRecordingLockName(checkpoint.recordingId));
@@ -201,6 +215,69 @@ export function createReplayRootRuntime({
       if (!value) prepareKey = null;
       diagnosticsChanged();
     });
+  }
+  function markerAllowed() {
+    return !leaving && allowed() && identityReady && !!pipeline;
+  }
+  function track(input: unknown): ReplayTrackResult {
+    try {
+      if (!markerAllowed()) return { status: "dropped", reason: "capture_not_permitted" };
+      if (emittingMarker) return { status: "dropped", reason: "rate_limited" };
+      emittingMarker = true;
+      try { return pipeline!.track(input); }
+      finally { emittingMarker = false; }
+    } catch { return { status: "dropped", reason: "recorder_unavailable" }; }
+  }
+  function getEvidenceReference(): ReplayEvidenceReference | null {
+    try {
+      if (!markerAllowed()) return null;
+      const evidence = pipeline!.getEvidenceReference();
+      if (evidence) issuedEvidence.set(evidence, generation);
+      return evidence;
+    } catch { return null; }
+  }
+  function trackAcknowledgedReport(acknowledgment: unknown, frozenEvidence: ReplayEvidenceReference): ReplayTrackResult {
+    try {
+      if (!markerAllowed()) return { status: "dropped", reason: "capture_not_permitted" };
+      if (!acknowledgment || typeof acknowledgment !== "object") return { status: "dropped", reason: "invalid_payload" };
+      const ack = acknowledgment as { durable?: unknown; reportId?: unknown; behaviorId?: unknown; occurrenceId?: unknown };
+      if (ack.durable !== true) return { status: "dropped", reason: "invalid_payload" };
+      const parsed = parseReplayMarker({ tag: "epic.bug.reported", payload: { version: 1,
+        reportId: ack.reportId, ...(ack.behaviorId === undefined ? {} : { behaviorId: ack.behaviorId }),
+        ...(ack.occurrenceId === undefined ? {} : { occurrenceId: ack.occurrenceId }) } });
+      if (!parsed.success || parsed.marker.tag !== "epic.bug.reported") return { status: "dropped", reason: "invalid_payload" };
+      const current = getEvidenceReference();
+      if (!current || issuedEvidence.get(frozenEvidence) !== generation ||
+          current.recordingId !== frozenEvidence.recordingId || current.startedAt !== frozenEvidence.startedAt ||
+          current.boundary !== frozenEvidence.boundary || current.release !== frozenEvidence.release || current.configVersion !== frozenEvidence.configVersion) return { status: "dropped", reason: "stale_reference" };
+      const key = `${current.recordingId}:${current.boundary}`;
+      if (reportContext !== key) { reported.clear(); reportContext = key; }
+      if (reported.has(parsed.marker.payload.reportId)) return { status: "dropped", reason: "duplicate" };
+      if (reported.size >= 128 || emittingMarker) return { status: "dropped", reason: "rate_limited" };
+      emittingMarker = true;
+      try {
+        const result = pipeline!.track(parsed.marker, { acknowledgedReport: true });
+        if (result.status === "emitted") reported.add(parsed.marker.payload.reportId);
+        return result;
+      } finally { emittingMarker = false; }
+    } catch { return { status: "dropped", reason: "invalid_payload" }; }
+  }
+  function scheduleScreen() {
+    if (screenTimer !== undefined || !markerAllowed()) return;
+    const run = generation;
+    screenTimer = setTimeout(() => {
+      screenTimer = undefined;
+      try {
+        if (run !== generation || !markerAllowed()) return;
+        const context = pipeline!.getEvidenceReference();
+        if (!context) return;
+        const path = normalizeReplayPath(getPathname());
+        const key = `${context.recordingId}:${context.boundary}:${path}`;
+        if (key === lastScreen) return;
+        lastScreen = key;
+        track({ tag: "epic.screen.viewed", payload: { version: 1, route: sanitizeMarkerRoute(path) } });
+      } catch { /* Navigation never depends on telemetry. */ }
+    }, 0);
   }
   async function own(name: string, signal: AbortSignal, timeoutMs = 1_000) {
     if (leases.get(name)?.isHeld()) return true;
@@ -416,16 +493,18 @@ export function createReplayRootRuntime({
   }
   function install() {
     cleanups.push(subscribePolicy(reconcile), consent.subscribe(reconcile), owners.subscribe(() => queueMicrotask(reconcile)));
+    cleanups.push(attachReplayBrowserMarkers(track));
+    const navigated = () => { reconcile(); scheduleScreen(); };
     for (const method of ["pushState", "replaceState"] as const) {
       const original = window.history[method];
-      const patched = function(this: History, ...args: Parameters<History["pushState"]>) { const result = original.apply(this, args); reconcile(); return result; };
+      const patched = function(this: History, ...args: Parameters<History["pushState"]>) { const result = original.apply(this, args); navigated(); return result; };
       window.history[method] = patched;
       cleanups.push(() => { if (window.history[method] === patched) window.history[method] = original; });
     }
     const show = (event: PageTransitionEvent) => { if (event.persisted || suspended) { suspended = false; candidate = null; handoff.clear(); cancel(); continuity = "new_recording"; replayLifecycle.gate(); reconcile(); } };
     window.addEventListener("pagehide", onPageHide);
     window.addEventListener("pageshow", show);
-    window.addEventListener("popstate", reconcile);
+    window.addEventListener("popstate", navigated);
     // The redirecting GET can be entered without a React auth mutation.
     const signoutNavigation = (url: string | undefined) => {
       if (!url) return;
@@ -449,7 +528,7 @@ export function createReplayRootRuntime({
     for (const name of ["pointerdown", "keydown", "scroll"] as const) window.addEventListener(name, onActivity, { passive: true });
     const tick = setInterval(onTick, 1_000);
     cleanups.push(() => {
-      clearInterval(tick); window.removeEventListener("pagehide", onPageHide); window.removeEventListener("pageshow", show); window.removeEventListener("popstate", reconcile);
+      clearInterval(tick); window.removeEventListener("pagehide", onPageHide); window.removeEventListener("pageshow", show); window.removeEventListener("popstate", navigated);
       document.removeEventListener("click", click, true); navigationTarget?.removeEventListener("navigate", navigate);
       for (const name of ["pointerdown", "keydown", "scroll"] as const) window.removeEventListener(name, onActivity);
     });
@@ -469,6 +548,9 @@ export function createReplayRootRuntime({
     if (!exhausted) publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false });
   }
   return {
+    track,
+    getEvidenceReference,
+    trackAcknowledgedReport,
     attach() { attached++; if (attached === 1) install(); reconcile(); return () => { attached = Math.max(0, attached - 1); if (!attached) { cancel(); if (!(suspended && continuity === "handoff")) invalidateHandoff(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); releaseOwner?.(); releaseOwner = null; } }; },
     setIdentity(key: string | null | undefined) {
       if (key === undefined) { beginIdentityRevalidation(); return; }

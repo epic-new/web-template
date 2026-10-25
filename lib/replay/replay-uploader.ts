@@ -2,6 +2,7 @@ import type { eventWithTime } from "@rrweb/types";
 
 import type { PublicReplayConfig } from "./replay-config.contract";
 import type { ReplayEventSink } from "./replay-buffer";
+import type { ReplayRecordingContext } from "./replay-evidence";
 import { jsonByteLength } from "./replay-redaction";
 import { replayUploadCheckpointSchema, type ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
 import {
@@ -1222,6 +1223,22 @@ export function createReplayUploader({
     /** Only ever a reference returned by a successful registration in this tab. */
     getRecordingReference(): ReplayRecordingReference | null {
       return state.current;
+    },
+
+    /** Independent of a clean upload frontier; safe even while a batch is pending. */
+    getRecordingContext(): ReplayRecordingContext | null {
+      if (halted || handoffQuiesced || !current?.reference || current.phase === "ended") return null;
+      return Object.freeze({ ...current.reference, release: current.registration.release,
+        configVersion: current.registration.configVersion });
+    },
+
+    /** Optional markers must never end a recording merely by exceeding its wire budget. */
+    preflightMarker(event: eventWithTime, boundary: number): "recording_unavailable" | "marker_too_large" | "invalid_payload" | null {
+      if (halted || handoffQuiesced || !current?.reference || current.phase === "ended" || current.boundary !== boundary) return "recording_unavailable";
+      if (!Number.isSafeInteger(event.timestamp) || event.timestamp < current.reference.startedAt) return "invalid_payload";
+      try {
+        return fitsAlone(current, jsonByteLength(event)) ? null : "marker_too_large";
+      } catch { return "marker_too_large"; }
     },
 
     /** Stable between changes, so it can back `useSyncExternalStore`. */

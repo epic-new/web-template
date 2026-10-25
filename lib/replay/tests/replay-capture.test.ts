@@ -4,9 +4,11 @@ import { EventType, IncrementalSource, type eventWithTime } from "@rrweb/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createReplayMemoryBuffer } from "../replay-buffer";
+import { attachReplayBrowserMarkers } from "../replay-browser-markers";
 import { createReplayCaptureSession } from "../replay-capture";
 import { disabledReplayConfig, REPLAY_RECORDING_LIMITS, type PublicReplayConfig } from "../replay-config.contract";
 import { epicReplayConsent } from "../replay-consent";
+import type { ReplayTrackResult } from "../replay-marker.contract";
 import { activeReplayPolicy } from "./replay-policy.fixture";
 
 const always = { decide: () => true };
@@ -94,6 +96,114 @@ describe("createReplayCaptureSession", () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     document.body.innerHTML = "";
+  });
+
+  it("emits actual pinned-recorder markers only through the permitted wrapper", async () => {
+    const buffer = createReplayMemoryBuffer(REPLAY_RECORDING_LIMITS);
+    const session = createReplayCaptureSession({ sink: buffer, getPolicy: () => activeReplayPolicy(),
+      subscribePolicy: () => () => {}, sampler: always, preflightMarker: () => null });
+    dispose = () => session.dispose();
+    const marker = { tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic.example" } };
+    expect(session.track(marker)).toMatchObject({ status: "dropped" });
+    epicReplayConsent.grant(); session.start(); await flush();
+    const before = buffer.events().length;
+    expect(session.track(marker)).toEqual({ status: "emitted" });
+    const captured = buffer.events().slice(before).find(({ event }) => event.type === EventType.Custom)!.event;
+    expect(captured).toMatchObject({ type: EventType.Custom, timestamp: expect.any(Number), data: marker });
+    const count = () => buffer.events().filter(({ event }) => event.type === EventType.Custom).length;
+    const n = count();
+    rrwebRecord.addCustomEvent("epic.bug.reported", { version: 1, reportId: "synthetic" });
+    rrwebRecord.addCustomEvent({ toJSON: () => "epic.bug.reported" } as unknown as string, { version: 1, reportId: "synthetic" });
+    expect(count()).toBe(n);
+    epicReplayConsent.withdraw();
+    expect(session.track(marker)).toMatchObject({ status: "dropped" });
+    expect(buffer.events()).toHaveLength(0);
+  });
+
+  it.each(["recorder", "sink"] as const)("contains an injected throwing %s without recursive markers, queue growth or an application exception", async (boundary) => {
+    // These are injected failure boundaries, not evidence of real rrweb capture.
+    const fake = fakeRecord();
+    const buffer = createReplayMemoryBuffer(REPLAY_RECORDING_LIMITS);
+    const onMarker = vi.fn();
+    const unhandledRejection = vi.fn();
+    const results: ReplayTrackResult[] = [];
+    let failureEnabled = true;
+    const throwTelemetryFailure = () => {
+      // A telemetry adapter can synchronously surface an error while handling
+      // another error. The real browser observer must not recurse into capture.
+      window.dispatchEvent(new ErrorEvent("error", {
+        error: new TypeError("synthetic private telemetry failure"),
+        message: "synthetic private telemetry failure", cancelable: true,
+      }));
+      throw new TypeError("synthetic private telemetry failure");
+    };
+    fake.record.addCustomEvent = vi.fn((tag, payload) => {
+      if (failureEnabled && boundary === "recorder") throwTelemetryFailure();
+      fake.emit({ type: EventType.Custom, timestamp: 3, data: { tag, payload } });
+    });
+    const session = createReplayCaptureSession({
+      sink: {
+        clear: buffer.clear,
+        push(event, recordingBoundary) {
+          if (failureEnabled && boundary === "sink" && event.type === EventType.Custom) throwTelemetryFailure();
+          buffer.push(event, recordingBoundary);
+        },
+      },
+      getPolicy: () => activeReplayPolicy(), subscribePolicy: () => () => {},
+      sampler: always, record: fake.record, preflightMarker: () => null, onMarker,
+    });
+    const detach = attachReplayBrowserMarkers((input) => {
+      const result = session.track(input);
+      results.push(result);
+      return result;
+    });
+    window.addEventListener("unhandledrejection", unhandledRejection);
+    dispose = () => {
+      detach();
+      session.dispose();
+      window.removeEventListener("unhandledrejection", unhandledRejection);
+    };
+    epicReplayConsent.grant();
+    session.start();
+    expect(session.getState().status).toBe("capturing");
+    const opening = buffer.events();
+    const openingBytes = buffer.byteSize();
+    const error = new ErrorEvent("error", {
+      error: new Error("synthetic private application error"),
+      message: "synthetic private application error", cancelable: true,
+    });
+
+    let operationFinished = false;
+    expect(() => {
+      window.dispatchEvent(error);
+      operationFinished = true;
+    }).not.toThrow();
+    await flush();
+
+    expect(operationFinished).toBe(true);
+    expect(error.defaultPrevented).toBe(false);
+    expect(results).toEqual([{ status: "dropped", reason: "recorder_unavailable" }]);
+    expect(fake.record.addCustomEvent).toHaveBeenCalledTimes(1);
+    expect(onMarker).not.toHaveBeenCalled();
+    expect(buffer.events()).toEqual(opening);
+    expect(buffer.byteSize()).toBe(openingBytes);
+    expect(unhandledRejection).not.toHaveBeenCalled();
+    expect(JSON.stringify(buffer.events())).not.toContain("synthetic private");
+
+    // Failed payloads are never deferred: restoring the adapter admits only
+    // the next explicit operation, after a new boundary if the sink failed.
+    failureEnabled = false;
+    session.refresh();
+    expect(session.getState().status).toBe("capturing");
+    expect(session.track({ tag: "epic.behavior.succeeded", payload: { version: 1, behaviorId: "synthetic.recovered" } })).toEqual({ status: "emitted" });
+    const markers = buffer.events().filter(({ event }) => event.type === EventType.Custom);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({
+      boundary: session.getState().boundary,
+      event: { data: { tag: "epic.behavior.succeeded", payload: { version: 1, behaviorId: "synthetic.recovered" } } },
+    });
+    expect(fake.record.addCustomEvent).toHaveBeenCalledTimes(2);
+    expect(onMarker).toHaveBeenCalledTimes(1);
   });
 
   it("records nothing before consent", () => {

@@ -11,6 +11,8 @@ import { replayLifecycle } from "./replay-lifecycle";
 import type { ReplaySampler } from "./replay-sampling";
 import { createReplayRecoveryBudget, type ReplayRecoveryBudget } from "./replay-runtime-policy";
 import type { ReplayUploadCheckpoint } from "./replay-upload-checkpoint";
+import { freezeReplayEvidence } from "./replay-evidence";
+import { parseReplayMarker, type ReplayMarkerSummary, type ReplayTrackResult } from "./replay-marker.contract";
 import {
   createReplayUploader,
   type ReplayRecordingReference,
@@ -64,6 +66,12 @@ export function createReplayRecordingPipeline({
   let started = false;
   let captureFailureHandled = false;
   let lastAcknowledged: { recordingId: string; acceptedBatches: number } | null = null;
+  let markers: readonly ReplayMarkerSummary[] = Object.freeze([]);
+  const markerNow = uploaderOptions.monotonicNow ?? (() => performance.now());
+  let lastMarkerTime = markerNow();
+  let markerTokens = 20;
+  let errorWindow = lastMarkerTime;
+  let errorCount = 0;
 
   const uploader = createReplayUploader({
     ...uploaderOptions,
@@ -85,7 +93,19 @@ export function createReplayRecordingPipeline({
     },
   });
 
-  const captureOptions: ReplayCaptureSessionOptions = { sink: uploader, getPolicy };
+  const captureOptions: ReplayCaptureSessionOptions = { sink: uploader, getPolicy,
+    preflightMarker: (event, boundary) => uploader.preflightMarker(event, boundary),
+    onMarker: (marker, timestamp, boundary) => {
+      const context = uploader.getRecordingContext();
+      if (!context || context.boundary !== boundary) return;
+      const evidence = freezeReplayEvidence(context, timestamp);
+      if (!evidence) return;
+      const summary = Object.freeze({ ...marker, payload: Object.freeze({ ...marker.payload }),
+        ...context, timestamp, offsetMs: evidence.offsetMs }) as ReplayMarkerSummary;
+      markers = Object.freeze([...markers.slice(-49), summary]);
+      changed(true);
+    },
+  };
   if (subscribePolicy) captureOptions.subscribePolicy = subscribePolicy;
   if (consent) captureOptions.consent = consent;
   if (sampler) captureOptions.sampler = sampler;
@@ -96,9 +116,9 @@ export function createReplayRecordingPipeline({
 
   let state: ReplayPipelineState = { capture: session.getState(), upload: uploader.getState() };
   const listeners = new Set<() => void>();
-  function changed() {
+  function changed(force = false) {
     const next = { capture: session.getState(), upload: uploader.getState() };
-    if (next.capture === state.capture && next.upload === state.upload) return;
+    if (!force && next.capture === state.capture && next.upload === state.upload) return;
     state = next;
     for (const listener of [...listeners]) listener();
   }
@@ -137,6 +157,33 @@ export function createReplayRecordingPipeline({
   const onPageHide = () => uploader.flushOnPageHide();
 
   return {
+    track(input: unknown, options: { acknowledgedReport?: boolean } = {}): ReplayTrackResult {
+      try {
+        const reason = session.markerBlockReason();
+        if (reason) return { status: "dropped", reason };
+        const context = uploader.getRecordingContext();
+        if (!context || context.boundary !== session.getState().boundary) return { status: "dropped", reason: "recording_unavailable" };
+        const parsed = parseReplayMarker(input);
+        if (!parsed.success || (parsed.marker.tag === "epic.bug.reported" && !options.acknowledgedReport)) return { status: "dropped", reason: "invalid_payload" };
+        const now = markerNow();
+        if (!Number.isFinite(now)) return { status: "dropped", reason: "recorder_unavailable" };
+        markerTokens = Math.min(20, markerTokens + Math.max(0, now - lastMarkerTime) * 120 / 60_000);
+        lastMarkerTime = Math.max(lastMarkerTime, now);
+        if (now - errorWindow >= 60_000) { errorWindow = now; errorCount = 0; }
+        const error = parsed.marker.tag.startsWith("epic.browser.");
+        if (markerTokens < 1 || (error && errorCount >= 10)) return { status: "dropped", reason: "rate_limited" };
+        markerTokens--;
+        if (error) errorCount++;
+        return session.track(parsed.marker);
+      } catch { return { status: "dropped", reason: "recorder_unavailable" }; }
+    },
+    getEvidenceReference() {
+      if (session.markerBlockReason()) return null;
+      const context = uploader.getRecordingContext();
+      return context?.boundary === session.getState().boundary
+        ? freezeReplayEvidence(context, uploaderOptions.wallNow?.() ?? Date.now()) : null;
+    },
+    getMarkerSummaries: () => markers,
     start({ explicit = true }: { explicit?: boolean } = {}): void {
       if (started) return;
       started = true;

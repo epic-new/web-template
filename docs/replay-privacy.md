@@ -9,6 +9,30 @@ The canonical root mounts one lazy EpicReplayProvider. It records nothing until
 runtime policy, consent, route, sampling and acknowledged identity all permit
 capture. The recorder chunk loads only after these gates and DOM readiness.
 
+## Versioned marker boundary
+
+[Epic replay markers](replay-events.md) use those same gates. Features call the
+public `useEpicReplay().track()` wrapper; disabled calls are harmless and retain
+no payload for later enablement. Known fields are projected into a small
+versioned Custom event. Marker data never includes free report text, error
+messages/stacks, arbitrary rejection values, user identity or credentials.
+Allowed IDs must be static developer identifiers or opaque generated IDs,
+never user-entered content. Unknown/dynamic routes are redacted or templated;
+queries and fragments are removed.
+
+Root-owned navigation/error listeners have bounded emission budgets and cleanup.
+Telemetry failure does not become another telemetry error. Local diagnostic
+summaries are bounded to 50 entries and displayed only inside `data-private`,
+so their changing counters/text cannot recursively enter the recorder.
+Local emission, transport receipt and playable evidence remain separate facts.
+
+Evidence selection returns only frozen recording/start/release/configuration
+and client-millisecond moment fields. Ordinary tracking cannot emit a report
+marker; the guarded acknowledgment adapter requires the original permitted
+recording attribution. It never includes report text or moves a late report
+marker onto a replacement recording. Durable report submission is a separate
+consumer responsibility, not implemented by this API.
+
 ## Consent
 
 ```ts

@@ -79,6 +79,29 @@ describe("createReplayUploader", () => {
     vi.useRealTimers();
   });
 
+  it("preflights markers against negotiated capacity without ending capture and exposes frozen safe context", async () => {
+    let release = "build-A";
+    const { uploader } = setup({ mode: "tiny_batch", getDocumentRelease: () => release });
+    expect(uploader.getRecordingContext()).toBeNull();
+    uploader.push(meta(), 1); uploader.push(full(), 1);
+    await flush(5_000);
+    const context = uploader.getRecordingContext()!;
+    release = "build-B";
+    expect(context).toEqual({ recordingId: expect.any(String), startedAt: T0, boundary: 1, release: "build-A", configVersion: "3" });
+    expect(Object.isFrozen(context)).toBe(true);
+    const tooLarge = ev(5, T0 + 5_000, { tag: "epic.screen.viewed", payload: { pad: "x".repeat(1_800) } });
+    expect(uploader.preflightMarker(tooLarge, 1)).toBe("marker_too_large");
+    expect(uploader.getState().status).toBe("pending");
+    expect(uploader.preflightMarker(ev(5, T0 + 5_000), 1)).toBeNull();
+    expect(uploader.preflightMarker(ev(5, T0 + 5_000), 2)).toBe("recording_unavailable");
+    uploader.push(incremental(T0 + 5_001), 1);
+    expect(uploader.getCheckpoint()).toBeNull();
+    expect(uploader.getRecordingContext()).toEqual(context);
+    uploader.clear();
+    expect(uploader.getRecordingContext()).toBeNull();
+    uploader.dispose();
+  });
+
   it("reports unavailable when registration allocation is blocked, without throwing into capture", () => {
     const { uploader, fetchSpy } = setup({ randomUUID: () => { throw new Error("blocked"); } });
     expect(() => uploader.push(meta(), 1)).not.toThrow();

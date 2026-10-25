@@ -63,7 +63,11 @@ function watchIdentity(host: DocumentHost) {
       host.runtime?.beginIdentityChange();
     } else refreshIdentity(host);
   });
-  const focus = () => refreshIdentity(host);
+  const focus = (event: FocusEvent) => {
+    // Capture also observes focus moving to controls inside the document.
+    // Only returning to the window needs identity revalidation.
+    if (event.target === event.currentTarget) refreshIdentity(host);
+  };
   let wasHidden = document.visibilityState === "hidden";
   const visibility = () => {
     if (document.visibilityState === "hidden") wasHidden = true;

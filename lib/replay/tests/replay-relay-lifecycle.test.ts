@@ -70,11 +70,16 @@ describe("root runtime through real BFF and document-independent synthetic relay
       async consume(generation, proof, now) { const row = rows.get(generation); if (!row || row.consumed || row.proof !== proof || row.expiresAt <= now) return false; row.consumed = true; return true; },
       async remove(generation) { rows.delete(generation); },
     };
-    const record = ((options?: { emit?: (event: eventWithTime) => void }) => {
+    let currentEmit: ((event: eventWithTime) => void) | undefined;
+    const record = Object.assign((options?: { emit?: (event: eventWithTime) => void }) => {
+      const emit = options?.emit;
+      currentEmit = emit;
       options?.emit?.({ type: 4, timestamp: Date.now(), data: { href: location.href, width: 100, height: 100 } } as eventWithTime);
       options?.emit?.({ type: 2, timestamp: Date.now(), data: { node: { type: 0, id: 1, childNodes: [] }, initialOffset: { left: 0, top: 0 } } } as unknown as eventWithTime);
-      return () => {};
-    }) as typeof rrwebRecord;
+      return () => { if (currentEmit === emit) currentEmit = undefined; };
+    }, { addCustomEvent: (tag: string, payload: unknown) => {
+      currentEmit?.({ type: 5, timestamp: Date.now(), data: { tag, payload } } as eventWithTime);
+    } }) as typeof rrwebRecord;
     const create = (type: "reload" | "navigate", opener = false, documentRelease = "synthetic-build-A") => {
       const runtime = createReplayRootRuntime({ documentRelease, getPolicy: () => policy,
         subscribePolicy: () => () => {}, fetch: browserFetch, pipelineOptions: { record },
@@ -91,10 +96,68 @@ describe("root runtime through real BFF and document-independent synthetic relay
     vi.useFakeTimers({ now: Date.now(), toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     return { create, inspect, control, browserFetch };
   }
-  async function capture(runtime: ReturnType<typeof createReplayRootRuntime>, timeout = 11_000) {
+  async function capture(runtime: ReturnType<typeof createReplayRootRuntime>, timeout = 11_000, cleanTimeout = 2_000) {
     await vi.waitFor(() => expect(runtime.getSnapshot().snapshotReceived, JSON.stringify(runtime.getSnapshot())).toBe(true), { timeout, interval: 100 });
-    await vi.waitFor(() => expect(runtime.getDiagnostics().eligibleHandoff).toBe(true), { timeout: 2_000, interval: 50 });
+    await vi.waitFor(() => expect(runtime.getDiagnostics().eligibleHandoff).toBe(true), { timeout: cleanTimeout, interval: 50 });
   }
+
+  it("delivers behavior occurrences through the real BFF and keeps original marker milliseconds after resume (injected recorder)", async () => {
+    const { create, inspect, control, browserFetch } = await setup();
+    const original = create("navigate");
+    await capture(original);
+    const reference = original.getSnapshot().reference!;
+    const occurrenceId = crypto.randomUUID();
+    const context = { version: 1 as const, behaviorId: "synthetic-operation", occurrenceId };
+
+    await control("lose_next_receipt");
+    expect(original.track({ tag: "epic.behavior.started", payload: context })).toEqual({ status: "emitted" });
+    await vi.advanceTimersByTimeAsync(37);
+    expect(original.track({ tag: "epic.behavior.succeeded", payload: context })).toEqual({ status: "emitted" });
+    // Reading current immutable evidence must work while these uploads are
+    // pending; a checkpoint-only implementation would incorrectly return null.
+    expect(original.getEvidenceReference()).toMatchObject({ recordingId: reference.recordingId,
+      startedAt: reference.startedAt, release: "synthetic-build-A", configVersion: "4" });
+    await capture(original, 11_000, 12_000);
+
+    const first = await inspect();
+    const occurrence = first.markers.filter((marker: { payload: { occurrenceId?: string } }) => marker.payload.occurrenceId === occurrenceId);
+    expect(occurrence).toHaveLength(2);
+    expect(occurrence.map((marker: { tag: string }) => marker.tag)).toEqual(["epic.behavior.started", "epic.behavior.succeeded"]);
+    expect(occurrence[1].timestamp - occurrence[0].timestamp).toBe(37);
+    for (const marker of occurrence) {
+      expect(marker).toMatchObject({ recordingId: reference.recordingId, startedAt: reference.startedAt,
+        payload: context, offsetMs: marker.timestamp - reference.startedAt });
+      expect(Number.isSafeInteger(marker.offsetMs)).toBe(true);
+    }
+    const batches = browserFetch.mock.calls.filter(([path, init]) => String(path).endsWith("/batches") &&
+      String(init?.body).includes(occurrenceId));
+    expect(batches).toHaveLength(2);
+    expect(batches[1]![1]!.body).toBe(batches[0]![1]!.body);
+    expect(first.calls).toContainEqual(expect.objectContaining({ status: "lost_receipt", recordingId: reference.recordingId }));
+
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    expect(original.getSnapshot().continuity).toBe("handoff");
+    original.dispose(); epicReplayConsent.reset();
+    await vi.advanceTimersByTimeAsync(200);
+    const successor = create("reload");
+    await capture(successor);
+    expect(successor.getSnapshot().reference).toMatchObject({ recordingId: reference.recordingId, startedAt: reference.startedAt });
+    const nextOccurrenceId = crypto.randomUUID();
+    const timestamp = Date.now();
+    expect(successor.track({ tag: "epic.behavior.failed", payload: {
+      version: 1, behaviorId: "synthetic-operation", occurrenceId: nextOccurrenceId, code: "synthetic_failure",
+    } })).toEqual({ status: "emitted" });
+    await capture(successor, 11_000, 12_000);
+    const resumed = await inspect();
+    expect(resumed.markers.filter((marker: { payload: { occurrenceId?: string } }) => marker.payload.occurrenceId === nextOccurrenceId)).toEqual([
+      expect.objectContaining({ recordingId: reference.recordingId, timestamp, startedAt: reference.startedAt,
+        offsetMs: timestamp - reference.startedAt, tag: "epic.behavior.failed" }),
+    ]);
+    expect(resumed.recordings).toEqual([expect.objectContaining({ recordingId: reference.recordingId,
+      release: "synthetic-build-A", configVersion: "4", status: "open" })]);
+    expect(successor.getSnapshot().evidence).toBe("unverified");
+    await PostDB(db, schema, { replay_recording: [{ recordingId: reference.recordingId, status: "open" }] });
+  }, 30_000);
 
   it("retries the real registration after reload, appends its fresh snapshot, and isolates an opener", async () => {
     const { create, inspect } = await setup();

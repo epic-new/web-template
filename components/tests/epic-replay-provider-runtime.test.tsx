@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import type { record as rrwebRecord } from "@rrweb/record";
 import type { eventWithTime } from "@rrweb/types";
+import { useEffect } from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReplayRootOptions, ReplayRootRuntime } from "@/lib/replay/replay-root-runtime";
@@ -118,6 +119,78 @@ describe("provider import and cross-tab boundaries through the real runtime", ()
       }
     },
   );
+
+  it("keeps markers and evidence available when descendant controls receive focus (injected recorder)", async () => {
+    let replay: ReturnType<typeof useEpicReplay> | undefined;
+    function Controls() {
+      const api = useEpicReplay();
+      useEffect(() => { replay = api; }, [api]);
+      return <><button>Run example</button><input aria-label="Harness input" /><a href="?synthetic=example#same-screen">Query/hash only</a><Readout /></>;
+    }
+    // This exercises provider focus ownership through the real runtime and
+    // pipeline; actual rrweb/browser receipt remains a separate browser check.
+    (record as unknown as typeof rrwebRecord).addCustomEvent = (tag, payload) => {
+      callbacks.at(-1)?.({ type: 5, timestamp: Date.now(), data: { tag, payload } } as eventWithTime);
+    };
+    render(<EpicReplayProvider documentRelease="build-A"><Controls /></EpicReplayProvider>);
+    await act(async () => { releaseImport(); });
+    await waitFor(() => expect(runtimes[0]?.getSnapshot().snapshotReceived).toBe(true), { timeout: 6_500 });
+    const runtime = runtimes[0]!;
+    const reference = runtime.getSnapshot().reference!;
+    const screens = () => runtime.getDiagnostics().markers.filter((marker) => marker.tag === "epic.screen.viewed");
+    expect(screens()).toHaveLength(1);
+
+    for (const control of [screen.getByRole("button"), screen.getByLabelText("Harness input"), screen.getByRole("link")]) {
+      act(() => { control.focus(); });
+      expect(auth.getSession).not.toHaveBeenCalled();
+      expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", reference, snapshotReceived: true });
+      expect(replay!.getEvidenceReference()).toMatchObject({ recordingId: reference.recordingId, startedAt: reference.startedAt });
+      act(() => {
+        expect(replay!.track({ tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId: crypto.randomUUID() } }))
+          .toEqual({ status: "emitted" });
+      });
+    }
+
+    act(() => {
+      window.history.pushState({}, "", "/styleguide/replay/upload?synthetic=example#same-screen");
+      window.dispatchEvent(new ErrorEvent("error", { error: new TypeError("private synthetic error"), message: "private synthetic error" }));
+      const rejection = new Event("unhandledrejection");
+      Object.defineProperty(rejection, "reason", { value: new TypeError("private synthetic rejection") });
+      window.dispatchEvent(rejection);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+    expect(auth.getSession).not.toHaveBeenCalled();
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(screens()).toHaveLength(1);
+    const errors = runtime.getDiagnostics().markers.filter((marker) => marker.tag.startsWith("epic.browser."));
+    expect(errors).toEqual([
+      expect.objectContaining({ tag: "epic.browser.error", recordingId: reference.recordingId }),
+      expect.objectContaining({ tag: "epic.browser.unhandled_rejection", recordingId: reference.recordingId }),
+    ]);
+    expect(JSON.stringify(errors)).not.toContain("private synthetic");
+  }, 10_000);
+
+  it("still gates markers synchronously while genuine window focus revalidates identity", async () => {
+    const session = deferred<{ data: { user: { id: string } }; error: null }>();
+    auth.getSession.mockReturnValue(session.promise);
+    (record as unknown as typeof rrwebRecord).addCustomEvent = (tag, payload) => {
+      callbacks.at(-1)?.({ type: 5, timestamp: Date.now(), data: { tag, payload } } as eventWithTime);
+    };
+    render(<EpicReplayProvider documentRelease="build-A"><Readout /></EpicReplayProvider>);
+    await act(async () => { releaseImport(); });
+    await waitFor(() => expect(runtimes[0]?.getSnapshot().snapshotReceived).toBe(true), { timeout: 6_500 });
+    const runtime = runtimes[0]!;
+    const before = runtime.getDiagnostics().markers;
+    act(() => { window.dispatchEvent(new FocusEvent("focus")); });
+    expect(auth.getSession).toHaveBeenCalledTimes(1);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "waiting", reason: "identity_pending", reference: null });
+    expect(runtime.getEvidenceReference()).toBeNull();
+    expect(runtime.track({ tag: "epic.behavior.started", payload: { version: 1 } })).toEqual({ status: "dropped", reason: "capture_not_permitted" });
+    expect(runtime.getDiagnostics().markers).toEqual(before);
+    await act(async () => { session.resolve({ data: { user: { id: "user-1" } }, error: null }); });
+    await waitFor(() => expect(runtime.getEvidenceReference()).not.toBeNull());
+    expect(runtime.getSnapshot().status).toBe("capturing");
+  }, 10_000);
 
   it("stops the old producer on cross-tab invalidation and waits for the new acknowledged account", async () => {
     const session = deferred<{ data: { user: { id: string } }; error: null }>();

@@ -18,6 +18,7 @@ function fakeRecord() {
     emit?.({ type: EventType.FullSnapshot, timestamp: Date.now() + 1, data: { node: { type: 0, id: 1, childNodes: [] } } } as unknown as eventWithTime);
     return vi.fn();
   }) as unknown as typeof rrwebRecord;
+  record.addCustomEvent = (tag, payload) => emit?.({ type: EventType.Custom, timestamp: Date.now(), data: { tag, payload } } as eventWithTime);
   return {
     record,
     emit: () =>
@@ -56,6 +57,48 @@ describe("createReplayRecordingPipeline", () => {
   afterEach(() => {
     epicReplayConsent.reset();
     vi.useRealTimers();
+  });
+
+  it("tracks behavior occurrences with original millisecond evidence and bounded private summaries", async () => {
+    const { pipeline, browser } = setup();
+    const occurrenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const start = { tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId } };
+    expect(pipeline.track(start)).toMatchObject({ status: "dropped" });
+    epicReplayConsent.grant(); pipeline.start(); await flush(5_000);
+    const frozen = pipeline.getEvidenceReference()!;
+    expect(frozen).toMatchObject({ startedAt: T0, capturedAt: T0 + 5_000, offsetMs: 5_000 });
+    expect(pipeline.track(start)).toEqual({ status: "emitted" });
+    expect(pipeline.track({ ...start, tag: "epic.behavior.succeeded" })).toEqual({ status: "emitted" });
+    expect(pipeline.getMarkerSummaries()).toEqual([
+      expect.objectContaining({ ...start, timestamp: T0 + 5_000, startedAt: T0, offsetMs: 5_000, recordingId: frozen.recordingId }),
+      expect.objectContaining({ tag: "epic.behavior.succeeded", payload: start.payload, recordingId: frozen.recordingId }),
+    ]);
+    expect(pipeline.track({ tag: "epic.bug.reported", payload: { version: 1, reportId: "synthetic" } })).toMatchObject({ status: "dropped", reason: "invalid_payload" });
+    await flush(5_000);
+    expect(browser.log.some((entry) => entry.path.endsWith("/batches") && entry.firstEventTypes?.includes(5))).toBe(true);
+    pipeline.stop(); pipeline.start(); await flush(5_000);
+    expect(pipeline.getEvidenceReference()?.recordingId).not.toBe(frozen.recordingId);
+    expect(frozen.offsetMs).toBe(5_000);
+    epicReplayConsent.withdraw();
+    expect(pipeline.getEvidenceReference()).toBeNull();
+    expect(pipeline.track(start)).toMatchObject({ status: "dropped" });
+    pipeline.dispose();
+  });
+
+  it("bounds marker bursts and automatic errors without replenishing on restart", async () => {
+    const { pipeline } = setup();
+    epicReplayConsent.grant(); pipeline.start(); await flush(5_000);
+    const error = { tag: "epic.browser.error", payload: { version: 1, errorClass: "Error", source: "uncaught_error" } };
+    for (let i = 0; i < 10; i++) expect(pipeline.track(error)).toEqual({ status: "emitted" });
+    expect(pipeline.track(error)).toMatchObject({ status: "dropped", reason: "rate_limited" });
+    const start = { tag: "epic.behavior.started", payload: { version: 1 } };
+    for (let i = 0; i < 10; i++) expect(pipeline.track(start)).toEqual({ status: "emitted" });
+    expect(pipeline.track(start)).toMatchObject({ status: "dropped", reason: "rate_limited" });
+    pipeline.stop(); pipeline.start(); await flush(0);
+    expect(pipeline.track(start)).toMatchObject({ status: "dropped", reason: "rate_limited" });
+    for (let i = 0; i < 60; i++) { await flush(500); pipeline.track(start); }
+    expect(pipeline.getMarkerSummaries()).toHaveLength(50);
+    pipeline.dispose();
   });
 
   it("starts a fresh recording with a new key and a new snapshot after delivery_uncertain", async () => {

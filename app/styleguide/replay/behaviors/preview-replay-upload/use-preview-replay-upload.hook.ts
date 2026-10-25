@@ -1,6 +1,5 @@
 "use client";
 
-import { record } from "@rrweb/record";
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import type { PublicReplayConfig } from "@/lib/replay/replay-config.contract";
@@ -11,6 +10,8 @@ import { createReplayIdentity, subscribeReplayIdentityBoundary } from "@/lib/rep
 import { evaluateCapturePermission } from "@/lib/replay/replay-permission";
 import { createReplaySampler } from "@/lib/replay/replay-sampling";
 import type { EpicReplaySnapshot, ReplayRootRuntime } from "@/lib/replay/replay-root-runtime";
+import type { ReplayMarkerSummary, ReplayTrackResult } from "@/lib/replay/replay-marker.contract";
+import type { ReplayEvidenceReference } from "@/lib/replay/replay-evidence";
 import { useEpicReplay, useEpicReplayDiagnostics, useEpicReplayRuntime } from "@/shared/hooks/use-epic-replay.hook";
 import {
   createReplayRecordingPipeline,
@@ -56,6 +57,14 @@ export interface ReplayForgedResult {
   code: string | null;
 }
 
+export interface ReplayExampleResult {
+  outcome: "succeeded" | "failed";
+  value: number | null;
+  occurrenceId: string;
+  started: ReplayTrackResult;
+  completed: ReplayTrackResult;
+}
+
 export interface ReplayUploadHarnessSnapshot {
   target: ReplayUploadTarget;
   fixtureMode: SyntheticFixtureMode;
@@ -68,6 +77,9 @@ export interface ReplayUploadHarnessSnapshot {
   provider?: EpicReplaySnapshot;
   eligibleHandoff?: boolean;
   recoveryDebt?: number;
+  markers: readonly ReplayMarkerSummary[];
+  example: ReplayExampleResult | null;
+  frozenEvidence: ReplayEvidenceReference | null;
 }
 
 const BASE_URL = "/api/epic/replay";
@@ -81,7 +93,9 @@ let pipeline: ReplayRecordingPipeline | null = null;
 let appLog: ReplayHarnessLogEntry[] = [];
 let forged: ReplayForgedResult[] = [];
 let logCounter = 0;
-let customCounter = 0;
+let example: ReplayExampleResult | null = null;
+let frozenEvidence: ReplayEvidenceReference | null = null;
+const failureTimers = new Set<ReturnType<typeof setTimeout>>();
 const listeners = new Set<() => void>();
 const policyListeners = new Set<() => void>();
 let unsubscribeFixture: (() => void) | null = null;
@@ -215,6 +229,9 @@ function build(): ReplayUploadHarnessSnapshot {
     } : idleState),
     log: target === "synthetic" ? harness.browser.log.map((entry) => ({ ...entry })) : appLog,
     forged,
+    markers: pipeline?.getMarkerSummaries() ?? [],
+    example,
+    frozenEvidence,
   };
 }
 
@@ -267,6 +284,8 @@ function setTarget(next: ReplayUploadTarget) {
   releaseOwner = null;
   if (next === "synthetic" && mounted > 0) acquireHarness();
   forged = [];
+  example = null;
+  frozenEvidence = null;
   for (const listener of [...policyListeners]) listener();
   emit();
 }
@@ -340,12 +359,53 @@ function stop() {
   emit();
 }
 
-function emitCustomEvent() {
+type ReplayApi = ReturnType<typeof useEpicReplay>;
+
+function track(api: ReplayApi, input: unknown): ReplayTrackResult {
   try {
-    record.addCustomEvent("epic-replay-harness", { n: ++customCounter });
+    return target === "application" ? api.track(input) : pipeline?.track(input) ?? { status: "dropped", reason: "recording_unavailable" };
   } catch {
-    // No active recorder: nothing to emit, and nothing escapes.
+    return { status: "dropped", reason: "recorder_unavailable" };
   }
+}
+
+/** Fixed local work, independent of telemetry success and never sourced from input. */
+function runExample(api: ReplayApi, fail: boolean) {
+  const occurrenceId = crypto.randomUUID();
+  const payload = { version: 1 as const, behaviorId: "synthetic.example", occurrenceId };
+  const started = track(api, { tag: "epic.behavior.started", payload });
+  let value: number | null = null;
+  let outcome: ReplayExampleResult["outcome"];
+  try {
+    const values: number[] = JSON.parse(fail ? "[2,3," : "[2,3,5]");
+    value = values.reduce((sum, item) => sum + item, 0);
+    outcome = "succeeded";
+  } catch {
+    outcome = "failed";
+  }
+  const completed = track(api, outcome === "succeeded"
+    ? { tag: "epic.behavior.succeeded", payload }
+    : { tag: "epic.behavior.failed", payload: { ...payload, code: "synthetic.invalid_json" } });
+  example = { outcome, value, occurrenceId, started, completed };
+  emit();
+  return example;
+}
+
+/** Real asynchronous browser failures; the browser's default handling is preserved. */
+function raiseFailure(kind: "error" | "rejection") {
+  const timer = setTimeout(() => {
+    failureTimers.delete(timer);
+    if (kind === "error") throw new TypeError("Synthetic replay example error");
+    void Promise.reject(new TypeError("Synthetic replay example rejection"));
+  }, 0);
+  failureTimers.add(timer);
+}
+
+function freezeEvidence(api: ReplayApi) {
+  try {
+    frozenEvidence = target === "application" ? api.getEvidenceReference() : pipeline?.getEvidenceReference() ?? null;
+  } catch { frozenEvidence = null; }
+  emit();
 }
 
 /**
@@ -445,6 +505,8 @@ function useHarnessLifetime() {
       unsubscribeConsent();
       mounted = Math.max(0, mounted - 1);
       if (mounted === 0) {
+        for (const timer of failureTimers) clearTimeout(timer);
+        failureTimers.clear();
         unsubscribeIdentity?.(); unsubscribeIdentity = null; identityTransitions.clear();
         bootstrap?.abort(); bootstrap = null;
         identityReady = false;
@@ -463,14 +525,19 @@ function useHarnessLifetime() {
   }, []);
 }
 
-function useControls(runtime: ReplayRootRuntime | null) {
+function useControls(runtime: ReplayRootRuntime | null, api: ReplayApi) {
   return {
     setTarget: useCallback((next: ReplayUploadTarget) => setTarget(next), []),
     setFixtureMode: useCallback((mode: SyntheticFixtureMode) => setFixtureMode(mode), []),
     start: useCallback(() => { if (target === "application") runtime?.start(); else startSynthetic(); }, [runtime]),
     stop: useCallback(() => { if (target === "application") runtime?.stop(); else stop(); }, [runtime]),
     restart: useCallback(() => { if (target === "application") runtime?.restart(); else { stop(); startSynthetic(); } }, [runtime]),
-    emitCustomEvent: useCallback(() => emitCustomEvent(), []),
+    emitCustomEvent: useCallback(() => runExample(api, false), [api]),
+    runSuccessfulExample: useCallback(() => runExample(api, false), [api]),
+    runFailedExample: useCallback(() => runExample(api, true), [api]),
+    raiseBrowserError: useCallback(() => raiseFailure("error"), []),
+    rejectPromise: useCallback(() => raiseFailure("rejection"), []),
+    freezeEvidence: useCallback(() => freezeEvidence(api), [api]),
     sendForgedRequests: useCallback(() => sendForgedRequests(), []),
   };
 }
@@ -482,7 +549,7 @@ export function usePreviewReplayUploadControls() {
   const root = useEpicReplay();
   const runtime = useEpicReplayRuntime();
   const state = useMemo(() => local.target === "application" ? { ...local, running: root.status === "capturing" } : local, [local, root.status]);
-  return { state, ...useControls(runtime) };
+  return { state, ...useControls(runtime, root) };
 }
 
 export function usePreviewReplayUpload() {
@@ -496,12 +563,13 @@ export function usePreviewReplayUpload() {
     ...local, pipeline: diagnostics?.pipeline ?? idleState,
     running: root.status === "capturing", provider: root,
     eligibleHandoff: diagnostics?.eligibleHandoff ?? false, recoveryDebt: diagnostics?.recoveryDebt ?? 0,
+    markers: diagnostics?.markers ?? [],
   } : local;
 
   return {
     state,
     log: state.log,
-    ...useControls(runtime),
+    ...useControls(runtime, root),
   };
 }
 
@@ -526,5 +594,9 @@ export function resetPreviewReplayUpload() {
   harnessPolicy = null;
   appLog = [];
   forged = [];
+  example = null;
+  frozenEvidence = null;
+  for (const timer of failureTimers) clearTimeout(timer);
+  failureTimers.clear();
   emit();
 }

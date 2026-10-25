@@ -2,6 +2,7 @@ import { EventType, IncrementalSource, type eventWithTime } from "@rrweb/types";
 import { describe, expect, it } from "vitest";
 
 import { createReplayEventSanitizer, sanitizeReplayEvent } from "../replay-event-sanitizer";
+import markerFixture from "./fixtures/epic-markers.v1.json";
 
 const event = (value: unknown) => value as eventWithTime;
 
@@ -41,7 +42,7 @@ describe("sanitizeReplayEvent", () => {
     );
 
     const json = JSON.stringify([meta, snapshot]);
-    expect((meta.data as { href: string }).href).toBe("https://app.test/");
+    expect((meta!.data as { href: string }).href).toBe("https://app.test/");
     expect(json).not.toMatch(/synthetic-(access-token|proxy-token|sig|csrf|text-token)/);
     expect(json).toContain("%5Bredacted%5D");
     expect(json).toContain("/b.png 2x");
@@ -52,7 +53,7 @@ describe("sanitizeReplayEvent", () => {
       type: EventType.Meta, timestamp: 1,
       data: { href: "https://app.test/orders?tab=open#details", width: 1, height: 1 },
     }));
-    expect((result.data as { href: string }).href).toBe("https://app.test/orders");
+    expect((result!.data as { href: string }).href).toBe("https://app.test/orders");
   });
 
   it("sanitizes added nodes, attribute changes and text changes in mutations", () => {
@@ -150,7 +151,7 @@ describe("sanitizeReplayEvent", () => {
     const result = sanitizer.sanitize(
       event({ type: EventType.IncrementalSnapshot, timestamp: 2, data: { source: IncrementalSource.Input, id: 4, text: "visible", isChecked: false } }),
     );
-    expect((result.data as { text: string }).text).toBe("visible");
+    expect((result!.data as { text: string }).text).toBe("visible");
   });
 
   it("redacts credentials in every CSS and URL-bearing channel and keeps the CSS intact", () => {
@@ -237,5 +238,24 @@ describe("sanitizeReplayEvent", () => {
     const original = event({ type: EventType.Meta, timestamp: 1, data: { href: "/?token=synthetic", width: 1, height: 1 } });
     sanitizeReplayEvent(original);
     expect((original as { data: { href: string } }).data.href).toBe("/?token=synthetic");
+  });
+
+  it("round-trips supported Epic Custom envelopes and drops invalid reserved tags", () => {
+    for (const fixture of markerFixture.events) expect(sanitizeReplayEvent(event(fixture))).toEqual(fixture);
+    for (const data of [
+      { tag: "epic.unknown", payload: { version: 1, message: "synthetic-secret" } },
+      { tag: "epic.behavior.started", payload: { version: 2 } },
+      { tag: "epic.bug.reported", payload: { version: 1 } },
+    ]) expect(sanitizeReplayEvent(event({ type: EventType.Custom, timestamp: 42, data }))).toBeNull();
+  });
+
+  it("projects reserved payloads before cloning without invoking unknown secret getters", () => {
+    const payload: Record<string, unknown> = { version: 1, behaviorId: "replay.example", message: "synthetic-secret" };
+    payload.self = payload;
+    Object.defineProperty(payload, "reportText", { enumerable: true, get() { throw new Error("private"); } });
+    expect(sanitizeReplayEvent(event({ type: EventType.Custom, timestamp: 123, data: { tag: "epic.behavior.started", payload } })))
+      .toEqual({ type: EventType.Custom, timestamp: 123, data: { tag: "epic.behavior.started", payload: { version: 1, behaviorId: "replay.example" } } });
+    const data = Object.defineProperty({}, "tag", { get() { throw new Error("private"); } });
+    expect(sanitizeReplayEvent(event({ type: EventType.Custom, timestamp: 123, data }))).toBeNull();
   });
 });

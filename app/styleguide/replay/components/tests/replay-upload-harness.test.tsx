@@ -13,6 +13,11 @@ const hook = vi.hoisted(() => ({
   stop: vi.fn(),
   restart: vi.fn(),
   emitCustomEvent: vi.fn(),
+  runSuccessfulExample: vi.fn(),
+  runFailedExample: vi.fn(),
+  raiseBrowserError: vi.fn(),
+  rejectPromise: vi.fn(),
+  freezeEvidence: vi.fn(),
   sendForgedRequests: vi.fn(async () => {}),
 }));
 
@@ -48,6 +53,9 @@ function show(state: ReplayUploadState, overrides: Partial<ReplayUploadHarnessSn
     pipeline: { capture: { status: "capturing", reason: null, boundary: 1 }, upload: state },
     log: [],
     forged: [],
+    markers: [],
+    example: null,
+    frozenEvidence: null,
     ...overrides,
   };
   cleanup();
@@ -133,18 +141,54 @@ describe("ReplayUploadHarness", { timeout: 30_000 }, () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start recording" }));
     fireEvent.click(screen.getByRole("button", { name: "Restart recording" }));
-    fireEvent.click(screen.getByRole("button", { name: "Emit custom event" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run successful example" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run failed example" }));
+    fireEvent.click(screen.getByRole("button", { name: "Raise browser error" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject promise" }));
+    fireEvent.click(screen.getByRole("button", { name: "Freeze evidence reference" }));
     fireEvent.click(screen.getByRole("button", { name: "Send forged requests" }));
     fireEvent.change(screen.getByLabelText("Fixture mode"), { target: { value: "fail_503" } });
     fireEvent.click(screen.getByLabelText("Application relay"));
 
     expect(hook.start).toHaveBeenCalled();
     expect(hook.restart).toHaveBeenCalled();
-    expect(hook.emitCustomEvent).toHaveBeenCalled();
+    expect(hook.runSuccessfulExample).toHaveBeenCalled();
+    expect(hook.runFailedExample).toHaveBeenCalled();
+    expect(hook.raiseBrowserError).toHaveBeenCalled();
+    expect(hook.rejectPromise).toHaveBeenCalled();
+    expect(hook.freezeEvidence).toHaveBeenCalled();
     expect(hook.sendForgedRequests).toHaveBeenCalled();
     expect(hook.setFixtureMode).toHaveBeenCalledWith("fail_503");
     expect(hook.setTarget).toHaveBeenCalledWith("application");
     expect(screen.getByRole("link", { name: "Navigate" })).toHaveAttribute("href", "/styleguide/replay/upload/second");
+    expect(screen.getByRole("link", { name: "Query/hash only" })).toHaveAttribute("href", "/styleguide/replay/upload?synthetic=example#replay-query-hash");
+  });
+
+  it("shows local outcomes, bounded safe marker context and a frozen moment only inside private readouts", () => {
+    const occurrenceId = "12660471-305d-4d65-9091-7ba3d1cd5499";
+    show(upload("pending"), {
+      target: "application",
+      example: { outcome: "succeeded", value: 10, occurrenceId, started: { status: "emitted" }, completed: { status: "emitted" } },
+      frozenEvidence: Object.freeze({ ...reference, release: "build-A", configVersion: "4", capturedAt: reference.startedAt + 5_100, offsetMs: 5_100 }),
+      markers: [{ ...reference, tag: "epic.behavior.succeeded", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId },
+        timestamp: reference.startedAt + 5_100, offsetMs: 5_100, release: "build-A", configVersion: "4" }],
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Succeeded - total 10");
+    const markers = screen.getByRole("table", { name: "Marker summaries" });
+    expect(markers).toHaveTextContent("epic.behavior.succeeded");
+    expect(markers).toHaveTextContent(occurrenceId);
+    expect(markers).toHaveTextContent("+5100 ms");
+    expect(markers.closest("[data-private]")).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Frozen evidence reference" })).toHaveTextContent("build-A");
+    expect(screen.getByRole("region", { name: "Frozen evidence reference" }).closest("[data-private]")).not.toBeNull();
+    expect(screen.getByText(/Local emission does not confirm upload or playback/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Raise browser error" }).closest("[data-private]")).not.toBeNull();
+
+    show(upload("idle"), { example: { outcome: "failed", value: null, occurrenceId,
+      started: { status: "dropped", reason: "capture_not_permitted" }, completed: { status: "dropped", reason: "capture_not_permitted" } } });
+    expect(screen.getByRole("status")).toHaveTextContent("Failed - fixed synthetic JSON could not be parsed");
+    expect(screen.getAllByText("Dropped - capture not permitted")).toHaveLength(2);
+    expect(screen.getByText("No available reference selected.")).toBeInTheDocument();
   });
 
   it("shows actual root continuity and eligibility without claiming playback or active open rows", () => {

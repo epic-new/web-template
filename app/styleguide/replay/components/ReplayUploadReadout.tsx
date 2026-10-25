@@ -3,6 +3,7 @@
 import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import type { ReplayRecordingHistoryEntry, ReplayUploadReason, ReplayUploadStatus } from '@/lib/replay/replay-uploader'
+import type { ReplayTrackResult } from '@/lib/replay/replay-marker.contract'
 import { usePreviewReplayUpload } from '../behaviors/preview-replay-upload/use-preview-replay-upload.hook'
 
 const REASON_TEXT: Partial<Record<NonNullable<ReplayUploadReason>, string>> = {
@@ -74,6 +75,10 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
+function trackResultLabel(result: ReplayTrackResult) {
+  return result.status === 'emitted' ? 'Emitted locally' : `Dropped - ${result.reason.replace(/_/g, ' ')}`
+}
+
 /**
  * The upload harness's live readout. Rendered inside `data-private`: it
  * re-renders on every admitted event, so recording it would record its own
@@ -127,6 +132,71 @@ export function ReplayUploadReadout() {
         <Field label="Buffered bytes" value={upload.bufferedBytes} />
         <Field label="Accepted batches" value={currentEntry?.acceptedBatches ?? 0} />
       </dl>
+
+      <section className="space-y-4" aria-label="Behavior example result">
+        <h3 className="text-sm font-semibold text-foreground">Last local operation</h3>
+        {state.example ? (
+          <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-4">
+            <p role="status" className="text-sm text-foreground">
+              {state.example.outcome === 'succeeded' ? `Succeeded - total ${state.example.value}` : 'Failed - fixed synthetic JSON could not be parsed'}
+            </p>
+            <dl className="grid gap-4 sm:grid-cols-3">
+              <Field label="Occurrence" value={state.example.occurrenceId} />
+              <Field label="Started marker" value={trackResultLabel(state.example.started)} />
+              <Field label="Terminal marker" value={trackResultLabel(state.example.completed)} />
+            </dl>
+          </div>
+        ) : <p className="text-sm text-muted-foreground">No example has run.</p>}
+      </section>
+
+      <section className="space-y-3" aria-label="Frozen evidence reference">
+        <h3 className="text-sm font-semibold text-foreground">Frozen evidence reference</h3>
+        <p className="text-xs text-muted-foreground">A selected moment stays attached to its original recording. Evidence remains unverified.</p>
+        {state.frozenEvidence ? (
+          <dl className="grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-3">
+            <Field label="Frozen recording" value={state.frozenEvidence.recordingId} />
+            <Field label="Frozen startedAt" value={state.frozenEvidence.startedAt} />
+            <Field label="Frozen moment (ms)" value={state.frozenEvidence.offsetMs} />
+            <Field label="Frozen capturedAt" value={state.frozenEvidence.capturedAt} />
+            <Field label="Frozen release" value={state.frozenEvidence.release ?? 'unknown'} />
+            <Field label="Frozen configVersion" value={state.frozenEvidence.configVersion} />
+          </dl>
+        ) : <p className="text-sm text-muted-foreground">No available reference selected.</p>}
+      </section>
+
+      <section className="space-y-3" aria-label="Locally emitted markers">
+        <h3 className="text-sm font-semibold text-foreground">Locally emitted markers</h3>
+        <p className="text-xs text-muted-foreground">
+          At most 50 safe summaries. Local emission does not confirm upload or playback;
+          accepted batches are shown separately. Times and offsets are milliseconds.
+        </p>
+        {state.markers.length === 0 ? <p className="text-sm text-muted-foreground">No markers emitted for this capture.</p> : (
+          <Table aria-label="Marker summaries">
+            <TableHeader><TableRow>
+              <TableHead>Marker / safe context</TableHead><TableHead>Recording / start</TableHead>
+              <TableHead>Timestamp / offset (ms)</TableHead><TableHead>Release / config</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>{state.markers.map((marker, index) => (
+              <TableRow key={`${marker.recordingId}:${marker.timestamp}:${index}`}>
+                <TableCell className="font-mono text-xs">
+                  <div>{marker.tag}</div>
+                  <div className="text-muted-foreground">
+                    {'route' in marker.payload && marker.payload.route}
+                    {'behaviorId' in marker.payload && marker.payload.behaviorId}
+                    {'errorClass' in marker.payload && marker.payload.errorClass}
+                  </div>
+                  {'occurrenceId' in marker.payload && <div>{marker.payload.occurrenceId}</div>}
+                  {'reportId' in marker.payload && <div>{marker.payload.reportId}</div>}
+                  {'code' in marker.payload && <div className="text-muted-foreground">{marker.payload.code}</div>}
+                </TableCell>
+                <TableCell className="font-mono text-xs"><div>{marker.recordingId}</div><div className="text-muted-foreground">{marker.startedAt}</div></TableCell>
+                <TableCell className="font-mono text-xs"><div>{marker.timestamp}</div><div className="text-muted-foreground">+{marker.offsetMs} ms</div></TableCell>
+                <TableCell className="font-mono text-xs"><div>{marker.release ?? 'unknown'}</div><div className="text-muted-foreground">{marker.configVersion}</div></TableCell>
+              </TableRow>
+            ))}</TableBody>
+          </Table>
+        )}
+      </section>
 
       <div className="space-y-2">
         <h3 className="text-sm font-medium text-foreground">Recording history</h3>

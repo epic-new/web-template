@@ -1,0 +1,14 @@
+{
+  "contractVersion": 1,
+  "acceptance": "synthetic producer fixture; Builder consumer agreement remains external",
+  "startedAt": 1800000000000,
+  "events": [
+    { "type": 5, "timestamp": 1800000000100, "data": { "tag": "epic.screen.viewed", "payload": { "version": 1, "route": "/styleguide/replay/upload", "screenId": "replay.upload" } } },
+    { "type": 5, "timestamp": 1800000000200, "data": { "tag": "epic.behavior.started", "payload": { "version": 1, "behaviorId": "replay.example", "occurrenceId": "00000000-0000-4000-8000-000000000001" } } },
+    { "type": 5, "timestamp": 1800000000300, "data": { "tag": "epic.behavior.succeeded", "payload": { "version": 1, "behaviorId": "replay.example", "occurrenceId": "00000000-0000-4000-8000-000000000001" } } },
+    { "type": 5, "timestamp": 1800000000400, "data": { "tag": "epic.behavior.failed", "payload": { "version": 1, "behaviorId": "replay.example", "occurrenceId": "00000000-0000-4000-8000-000000000002", "code": "synthetic_failure" } } },
+    { "type": 5, "timestamp": 1800000000500, "data": { "tag": "epic.bug.reported", "payload": { "version": 1, "reportId": "synthetic-report-1", "behaviorId": "replay.example", "occurrenceId": "00000000-0000-4000-8000-000000000002" } } },
+    { "type": 5, "timestamp": 1800000000600, "data": { "tag": "epic.browser.error", "payload": { "version": 1, "errorClass": "TypeError", "source": "uncaught_error" } } },
+    { "type": 5, "timestamp": 1800000000700, "data": { "tag": "epic.browser.unhandled_rejection", "payload": { "version": 1, "errorClass": "Error", "reasonKind": "primitive" } } }
+  ]
+}
