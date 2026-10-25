@@ -123,6 +123,7 @@ describe("sanitizeCssText", () => {
     String.raw`url(/a?\000074 oken=synthetic-escaped)`,
     String.raw`u\72l("/a?token=synthetic-escaped")`,
     String.raw`u\000072 l("/a?token=synthetic-escaped")`,
+    "u\\72\r\nl(\"/a?token=synthetic-escaped\")",
     String.raw`url('/a?tok\65n=synthetic-escaped\'tail')`,
     String.raw`url(/a?tok\65n=synthetic-escaped\)tail)`,
     String.raw`url("https://user:\70ass@app.test/a?ok=synthetic-escaped")`,

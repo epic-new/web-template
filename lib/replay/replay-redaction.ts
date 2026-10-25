@@ -120,8 +120,9 @@ export function sanitizeReplayText(text: string, maxLength: number = REPLAY_PAYL
 
 const CSS_URL = /url\(\s*(?:(['"])([^'")]*)\1|([^'")\s]+))\s*\)/gi;
 const CSS_IMPORT = /@import\s+(['"])([^'"]*)\1/gi;
-const CSS_IDENTIFIER = /(?:[a-z\d_-]|\\(?:[\da-f]{1,6}[ \t\r\n\f]?|[\s\S]))+/gi;
-const CSS_ESCAPE = /\\([\da-f]{1,6})[ \t\r\n\f]?|\\([\s\S])/gi;
+// CSS preprocessing treats CRLF as one whitespace terminator after a hex escape.
+const CSS_IDENTIFIER = /(?:[a-z\d_-]|\\(?:[\da-f]{1,6}(?:\r\n|[ \t\r\n\f])?|[\s\S]))+/gi;
+const CSS_ESCAPE = /\\([\da-f]{1,6})(?:\r\n|[ \t\r\n\f])?|\\([\s\S])/gi;
 
 /** Raw CSSOM arguments precede browser escape normalization in rrweb. */
 function redactEscapedCssResources(css: string): string {
