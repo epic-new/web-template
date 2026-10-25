@@ -1,5 +1,10 @@
 import "server-only";
 
+import {
+  replayPublishingErrorBodySchema,
+  type ReplayPublishingErrorCode,
+} from "@/lib/replay/replay-upload-contract";
+
 export type EpicIntegrationErrorCode =
   | "unauthorized"
   | "unavailable"
@@ -22,6 +27,23 @@ export class EpicIntegrationError extends Error {
       status === undefined ? undefined : { cause: { status } },
     );
     this.name = "EpicIntegrationError";
+  }
+}
+
+/**
+ * A typed refusal from Epic's publishing routes (EPI-210/211): the exact HTTP
+ * status, code and typed fields of the flat envelope. The message is fixed
+ * text; Epic's own text, body and headers are never kept.
+ */
+export class EpicPublishingError extends Error {
+  constructor(
+    public readonly code: ReplayPublishingErrorCode,
+    public readonly status: number,
+    public readonly expectedSequence?: number,
+    public readonly retryAfterMs?: number,
+  ) {
+    super("Epic refused the publishing request");
+    this.name = "EpicPublishingError";
   }
 }
 
@@ -96,6 +118,53 @@ export class EpicClient {
     } catch {
       throw new EpicIntegrationError("invalid_response", response.status);
     }
+  }
+
+  /**
+   * POSTs a JSON body as the publishing credential. Only Authorization,
+   * Content-Type and Accept are sent: nothing from the incoming request (cookies,
+   * origin, referrer, forwarding or User-Agent headers) can reach Epic.
+   *
+   * A non-2xx answer in Epic's flat error envelope becomes an
+   * `EpicPublishingError`; anything else that fails is `unavailable`.
+   */
+  async post(
+    path: string,
+    body: unknown,
+    { signal, timeoutMs = REQUEST_TIMEOUT_MS }: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ status: number; body: unknown }> {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(`${this.#baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.#token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+        redirect: "error",
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      });
+    } catch {
+      throw new EpicIntegrationError("unavailable");
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new EpicIntegrationError(response.ok ? "invalid_response" : "unavailable", response.status);
+    }
+
+    if (response.ok) return { status: response.status, body: payload };
+
+    const envelope = replayPublishingErrorBodySchema.safeParse(payload);
+    if (!envelope.success) throw new EpicIntegrationError("unavailable", response.status);
+    const { code, expectedSequence, retryAfterMs } = envelope.data;
+    throw new EpicPublishingError(code, response.status, expectedSequence, retryAfterMs);
   }
 
   toString(): string {

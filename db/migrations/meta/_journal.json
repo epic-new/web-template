@@ -8,6 +8,13 @@
       "when": 1783556494770,
       "tag": "0000_sturdy_skullbuster",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792934135932,
+      "tag": "0001_shallow_hex",
+      "breakpoints": true
     }
   ]
 }
