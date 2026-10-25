@@ -149,6 +149,7 @@ export class ReadReplayConfig {
           maxBufferBytes: recording.limits.maxBufferBytes,
           maxBufferAgeMs: recording.limits.maxBufferAgeMs,
           flushIntervalMs: recording.limits.flushIntervalMs,
+          flushBytes: recording.limits.flushBytes,
           maxAttempts: recording.limits.maxAttempts,
         },
       },

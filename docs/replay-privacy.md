@@ -143,11 +143,15 @@ Epic with the server's publishing credential.
   recording id; `startedAt` is the first event's timestamp and survives retries.
 - **Batches.** One request in flight; each batch's id, sequence and events are
   frozen before the first attempt and only that batch is retried (up to
-  `maxAttempts`, backoff 500 ms, 1 s, 2 s). An expired capability is renewed and
+  `maxAttempts`, backoff 500 ms, 1 s, 2 s) after a network error, a timeout,
+  `unavailable` or `rate_limited` (which waits `retryAfterMs`). A batch leaves
+  after `flushIntervalMs`, once `flushBytes` are queued, or when the tab turns
+  hidden; sequence 0 (Meta then FullSnapshot) leaves at once. A retried batch may
+  already be stored: Epic's playback drops exact duplicate events. An expired capability is renewed and
   the identical batch resent. A single event larger than `maxBatchBytes` ends the
   recording as "snapshot too large"; nothing is truncated.
-- **Uncertain delivery** (`delivery_uncertain`, `out_of_order`, a closed
-  recording) is never resent or renumbered: the recording is marked incomplete and,
+- **A recording that cannot continue** (every attempt failed, or
+  `recording_closed`) is never renumbered or continued past a gap: it is marked incomplete and,
   within a restart budget of `maxAttempts` that refills only after a recording
   uploads two batches, a new recording starts with a new key and FullSnapshot.
 - **Evidence stays unverified.** A registration or accepted batch is never

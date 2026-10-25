@@ -39,7 +39,6 @@ export class EpicPublishingError extends Error {
   constructor(
     public readonly code: ReplayPublishingErrorCode,
     public readonly status: number,
-    public readonly expectedSequence?: number,
     public readonly retryAfterMs?: number,
   ) {
     super("Epic refused the publishing request");
@@ -165,8 +164,8 @@ export class EpicClient {
 
     const envelope = replayPublishingErrorBodySchema.safeParse(payload);
     if (!envelope.success) throw new EpicIntegrationError("unavailable", response.status);
-    const { code, expectedSequence, retryAfterMs } = envelope.data;
-    throw new EpicPublishingError(code, response.status, expectedSequence, retryAfterMs);
+    const { code, retryAfterMs } = envelope.data;
+    throw new EpicPublishingError(code, response.status, retryAfterMs);
   }
 
   toString(): string {

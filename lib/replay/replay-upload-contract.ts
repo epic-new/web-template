@@ -51,10 +51,7 @@ export const REPLAY_PUBLISHING_ERROR_CODES = [
   "reporting_disabled",
   "recording_not_found",
   "idempotency_conflict",
-  "out_of_order",
-  "upload_in_progress",
   "recording_closed",
-  "delivery_uncertain",
   "payload_too_large",
   "invalid_request",
   "invalid_evidence",
@@ -88,10 +85,7 @@ export const REPLAY_UPLOAD_ERROR_STATUS: Record<ReplayUploadErrorCode, number> =
   reporting_disabled: 403,
   recording_not_found: 404,
   idempotency_conflict: 409,
-  out_of_order: 409,
-  upload_in_progress: 409,
   recording_closed: 409,
-  delivery_uncertain: 409,
   payload_too_large: 413,
   invalid_request: 422,
   invalid_evidence: 422,
@@ -113,10 +107,7 @@ export const REPLAY_UPLOAD_ERROR_MESSAGES: Record<ReplayUploadErrorCode, string>
   reporting_disabled: "Problem reports are disabled.",
   recording_not_found: "The recording was not found.",
   idempotency_conflict: "The same key was used for different content.",
-  out_of_order: "The batch is out of order.",
-  upload_in_progress: "Another upload is in progress.",
-  recording_closed: "The recording no longer accepts events.",
-  delivery_uncertain: "Delivery of the batch could not be confirmed.",
+  recording_closed: "The recording no longer accepts events; start a new recording.",
   payload_too_large: "The request is too large.",
   invalid_request: "The request is not valid.",
   invalid_evidence: "The recording reference is not valid.",
@@ -132,7 +123,6 @@ export interface ReplayUploadErrorBody {
   contractVersion: 1;
   error: string;
   code: ReplayUploadErrorCode;
-  expectedSequence?: number;
   retryAfterMs?: number;
 }
 
@@ -141,7 +131,6 @@ export const replayUploadErrorBodySchema = z
     contractVersion: z.literal(REPLAY_UPLOAD_CONTRACT_VERSION),
     error: z.string(),
     code: z.enum([...REPLAY_PUBLISHING_ERROR_CODES, ...REPLAY_RELAY_ERROR_CODES]),
-    expectedSequence: z.number().int().nonnegative().optional(),
     retryAfterMs: z.number().int().positive().optional(),
   })
   .strict();
@@ -152,7 +141,6 @@ export const replayPublishingErrorBodySchema = z
     contractVersion: z.literal(REPLAY_UPLOAD_CONTRACT_VERSION),
     error: z.string(),
     code: z.enum(REPLAY_PUBLISHING_ERROR_CODES),
-    expectedSequence: z.number().int().nonnegative().optional(),
     retryAfterMs: z.number().int().positive().optional(),
   })
   .strict();
@@ -219,7 +207,7 @@ export type ReplayEventEnvelope = z.infer<typeof replayEventEnvelopeSchema>;
 export const replayBatchRequestSchema = z
   .object({
     contractVersion: z.literal(REPLAY_UPLOAD_CONTRACT_VERSION),
-    recordingToken: z.string().min(1).max(256),
+    recordingToken: z.string().min(1).max(512),
     batchId: uuidSchema,
     sequence: z.number().int().min(0).max(1_000_000),
     events: z.array(replayEventEnvelopeSchema).max(REPLAY_BATCH_MAX_EVENTS),
@@ -230,16 +218,18 @@ export type ReplayBatchRequest = z.infer<typeof replayBatchRequestSchema>;
 
 export const replayAvailabilitySchema = z.enum(REPLAY_AVAILABILITIES);
 
+/** A sealed capability: opaque to the application, which only stores and resends it. */
+export const REPLAY_RECORDING_TOKEN_PATTERN = /^eprc_1\.[A-Za-z0-9_-]{40,480}$/;
+
 /** Registration (201/200) and capability renewal (200) share this shape. */
 export const replayRecordingResponseSchema = z
   .object({
     contractVersion: z.literal(REPLAY_UPLOAD_CONTRACT_VERSION),
     recordingId: uuidSchema,
-    recordingToken: z.string().min(1).max(256),
+    recordingToken: z.string().regex(REPLAY_RECORDING_TOKEN_PATTERN),
     tokenExpiresAt: epochMsSchema,
     startedAt: epochMsSchema,
     availability: replayAvailabilitySchema,
-    nextSequence: z.number().int().nonnegative(),
     limits: replayRecordingLimitsSchema,
   })
   .strict();
@@ -252,8 +242,6 @@ export const replayBatchResponseSchema = z
     batchId: uuidSchema,
     sequence: z.number().int().nonnegative(),
     delivery: z.enum(["accepted", "finalized"]),
-    availability: replayAvailabilitySchema,
-    nextSequence: z.number().int().nonnegative(),
   })
   .strict();
 export type ReplayBatchResponse = z.infer<typeof replayBatchResponseSchema>;

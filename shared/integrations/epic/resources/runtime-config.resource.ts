@@ -57,6 +57,7 @@ const runtimeConfigResourceSchema = z
             maxBufferBytes: positiveIntSchema,
             maxBufferAgeMs: positiveIntSchema,
             flushIntervalMs: positiveIntSchema,
+            flushBytes: positiveIntSchema,
             maxAttempts: positiveIntSchema,
           })
           .strict(),

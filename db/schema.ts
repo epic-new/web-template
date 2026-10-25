@@ -101,7 +101,7 @@ export const replayRecording = sqliteTable(
 export type InsertReplayRecording = typeof replayRecording.$inferInsert;
 export type SelectReplayRecording = typeof replayRecording.$inferSelect;
 
-export const REPLAY_RATE_BUCKETS = ["register", "capability", "batch", "report", "identity"] as const;
+export const REPLAY_RATE_BUCKETS = ["register", "capability", "report", "identity"] as const;
 export type ReplayRateBucket = (typeof REPLAY_RATE_BUCKETS)[number];
 
 /** Fixed-window counters per subject and bucket, shared by every server process. */

@@ -45,7 +45,7 @@ describe("replay upload contract", () => {
   it("bounds batches and report text", () => {
     const batch = {
       contractVersion: 1,
-      recordingToken: "eprc_token",
+      recordingToken: "eprc_1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       batchId: registration.idempotencyKey,
       sequence: 0,
       events: [],

@@ -140,6 +140,8 @@ interface Segment {
   retryAt: number;
   renewed: boolean;
   lastFlushAt: number | null;
+  /** Set when the tab hides: send what is queued now, without closing. */
+  flushRequested: boolean;
   entry: ReplayHistoryEntry | null;
   lostReason: ReplayUploadReason | null;
 }
@@ -150,7 +152,6 @@ type Failure =
       kind: "error";
       status: number;
       code: ReplayUploadErrorCode;
-      expectedSequence?: number;
       retryAfterMs?: number;
     };
 
@@ -162,15 +163,11 @@ const OLD_RECORDING_CODES = new Set<ReplayUploadErrorCode>([
   "subject_mismatch",
   "recording_not_found",
   "recording_closed",
-  "out_of_order",
-  "delivery_uncertain",
 ]);
-const INCOMPLETE_CODES = new Set<ReplayUploadErrorCode>([
-  "out_of_order",
-  "delivery_uncertain",
-  "recording_closed",
-]);
-const TRANSIENT_CODES = new Set<ReplayUploadErrorCode>(["unavailable", "upload_in_progress", "rate_limited"]);
+const INCOMPLETE_CODES = new Set<ReplayUploadErrorCode>(["recording_closed"]);
+// A batch answered with one of these, or not answered at all, may or may not
+// be stored. Retrying the identical batch is safe: playback drops duplicates.
+const TRANSIENT_CODES = new Set<ReplayUploadErrorCode>(["unavailable", "rate_limited"]);
 
 export function createReplayUploader(options: ReplayUploaderOptions) {
   const {
@@ -401,6 +398,7 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
           retryAt: 0,
           renewed: false,
           lastFlushAt: null,
+          flushRequested: false,
           entry: null,
           lostReason: null,
         };
@@ -427,12 +425,20 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
   }
 
   function wake(segment: Segment, limits: Limits) {
-    const full = segment.queue.length >= limits.maxBatchEvents || segment.queueBytes >= limits.maxBatchBytes;
+    const full = isFull(segment, limits);
     if (full || segment.phase === "pending" || segment.lastFlushAt === null) {
       schedule(0);
       return;
     }
     schedule(segment.lastFlushAt + limits.flushIntervalMs - monotonicNow());
+  }
+
+  function isFull(segment: Segment, limits: Limits): boolean {
+    return (
+      segment.queue.length >= limits.maxBatchEvents ||
+      segment.queueBytes >= limits.maxBatchBytes ||
+      segment.queueBytes >= limits.flushBytes
+    );
   }
 
   function clear() {
@@ -501,8 +507,8 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
     if (segment.queue.length > 0) {
       // Sequence 0 opens with Meta and FullSnapshot together.
       if (segment.sequence === 0 && segment.queue.length < 2) return false;
-      if (segment.closing || segment.lastFlushAt === null) return true;
-      if (segment.queue.length >= limits.maxBatchEvents || segment.queueBytes >= limits.maxBatchBytes) return true;
+      if (segment.closing || segment.flushRequested || segment.lastFlushAt === null) return true;
+      if (isFull(segment, limits)) return true;
       return monotonicNow() - segment.lastFlushAt >= limits.flushIntervalMs;
     }
     return segment.closing && segment.accepted > 0;
@@ -518,7 +524,12 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
       if (!ready) {
         const waiting = segments.find((segment) => segment.phase !== "dead" && segment.queue.length > 0);
         if (waiting) {
-          const nextFlush = (waiting.lastFlushAt ?? 0) + limits.flushIntervalMs - monotonicNow();
+          // Without a first flush it is waiting for sequence 0's second event,
+          // which wakes it; only retention can fire before that.
+          const nextFlush =
+            waiting.lastFlushAt === null
+              ? Infinity
+              : waiting.lastFlushAt + limits.flushIntervalMs - monotonicNow();
           schedule(Math.min(Math.max(nextFlush, 0), Math.max(retentionLeft(waiting), 0)));
         }
         publish();
@@ -587,7 +598,6 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
         kind: "error",
         status: response.status,
         code: error.data.code,
-        expectedSequence: error.data.expectedSequence,
         retryAfterMs: error.data.retryAfterMs,
       };
     } catch {
@@ -657,11 +667,9 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
     if (isDead(segment)) return;
     if (!result.ok) return onFailure(segment, result);
 
-    const { recordingId, recordingToken, nextSequence, startedAt } = result.body;
-    // A higher cursor is another producer's history, not ours to splice.
-    if (nextSequence !== 0 || startedAt !== segment.startedAt) {
-      return lose(segment, "out_of_order", "incomplete");
-    }
+    const { recordingId, recordingToken, startedAt } = result.body;
+    // Another producer's recording is not ours to extend.
+    if (startedAt !== segment.startedAt) return lose(segment, "recording_closed", "incomplete");
     segment.recording = { id: recordingId, token: recordingToken };
     segment.phase = "registered";
     segment.attempts = 0;
@@ -762,35 +770,34 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
     const recording = segment.recording;
     const base = `/recordings/${encodeURIComponent(recording.id)}`;
 
-    const result = await call(
-      `${base}/batches`,
-      {
-        contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
-        recordingToken: recording.token,
-        batchId: batch.batchId,
-        sequence: batch.sequence,
-        events: batch.events,
-        final: batch.final,
-      },
-      replayBatchResponseSchema,
-      segment,
-    );
+    const payload = {
+      contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
+      recordingToken: recording.token,
+      batchId: batch.batchId,
+      sequence: batch.sequence,
+      events: batch.events,
+      final: batch.final,
+    };
+    // A hidden tab may be frozen or closed before a plain request finishes.
+    const keepalive = segment.flushRequested && jsonByteLength(payload) <= KEEPALIVE_MAX_BYTES;
+    const result = await call(`${base}/batches`, payload, replayBatchResponseSchema, segment, { keepalive });
     if (isDead(segment)) return;
 
     if (result.ok) {
       const ack = result.body;
       if (ack.batchId !== batch.batchId || ack.sequence !== batch.sequence) {
-        return lose(segment, "out_of_order", "incomplete");
+        return lose(segment, "recording_closed", "incomplete");
       }
       segment.sequence = batch.sequence + 1;
       segment.accepted += 1;
       segment.frozen = null;
       segment.attempts = 0;
       segment.renewed = false;
+      segment.flushRequested = false;
       segment.lastFlushAt = monotonicNow();
       if (segment.entry) {
         segment.entry.acceptedBatches = segment.accepted;
-        segment.entry.availability = ack.availability;
+        segment.entry.availability = "events_received";
       }
       if (batch.final) finish(segment);
       return;
@@ -854,6 +861,15 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
     }
   }
 
+  /** Sends what is queued now without closing: the tab may come back. */
+  function flushNow() {
+    const segment = active();
+    if (!segment || disposed || segment.phase === "dead") return;
+    if (segment.queue.length === 0 && !segment.frozen) return;
+    segment.flushRequested = true;
+    schedule(0);
+  }
+
   function dispose() {
     disposed = true;
     clear();
@@ -883,9 +899,10 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
       schedule(0);
     },
     closeForUnload,
+    flushNow,
     /** Failed recordings that should restart rather than stay down. */
     shouldRestart(reason: ReplayUploadReason): boolean {
-      return reason === "buffer_exceeded" || OLD_RECORDING_CODES.has(reason as ReplayUploadErrorCode);
+      return reason === "buffer_exceeded" || reason === "attempts_exhausted" || OLD_RECORDING_CODES.has(reason as ReplayUploadErrorCode);
     },
     getReference,
     getState: () => state,

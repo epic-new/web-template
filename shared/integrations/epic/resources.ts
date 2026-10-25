@@ -34,6 +34,7 @@ export interface RuntimeConfigResource {
       maxBufferBytes: number;
       maxBufferAgeMs: number;
       flushIntervalMs: number;
+      flushBytes: number;
       maxAttempts: number;
     };
   };

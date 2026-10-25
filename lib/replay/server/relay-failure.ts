@@ -16,7 +16,6 @@ export function relayFailure(error: unknown): ReplayUploadError {
   if (error instanceof EpicPublishingError) {
     return new ReplayUploadError(error.code, {
       status: error.status,
-      expectedSequence: error.expectedSequence,
       retryAfterMs: error.retryAfterMs,
     });
   }

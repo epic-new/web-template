@@ -17,7 +17,6 @@ import {
 import { ReplayRecordingModel } from "@/shared/models/replay-recording";
 import { ReplayRecordingPolicy } from "@/shared/policies/replay-recording.policy";
 
-const BATCH_RATE = { limit: 120, windowMs: 60_000 };
 // Epic bounds its own provider call at 10 s; leave room for its answer.
 const RELAY_TIMEOUT_MS = 15_000;
 
@@ -28,11 +27,11 @@ export interface UploadReplayBatchCommand {
 }
 
 /**
- * Relays one ordered batch for a recording this server registered. The batch
- * is forwarded as the browser froze it plus the trusted subject; Epic's
- * receipt decides accepted, in progress or uncertain, and its answer is
- * returned unchanged. No event is stored or logged here, and the local status
- * never blocks a retry: Epic replays an accepted receipt even after closure.
+ * Relays one batch for a recording this server registered. The batch is
+ * forwarded as the browser froze it plus the trusted subject, and Epic's
+ * answer is returned unchanged. Epic keeps no per-batch state and limits
+ * requests itself, so nothing is written here per batch; no event is stored or
+ * logged, and the local status never blocks a retry.
  */
 export class UploadReplayBatch {
   static async execute(command: UploadReplayBatchCommand): Promise<ReplayBatchResponse> {
@@ -68,12 +67,6 @@ export class UploadReplayBatch {
         throw new ReplayUploadError("payload_too_large");
       }
 
-      const rate = await ReplayRecordingModel.consumeRate(subjectId, "batch", {
-        ...BATCH_RATE,
-        now: Date.now(),
-      });
-      if (!rate.allowed) throw new ReplayUploadError("rate_limited", { retryAfterMs: rate.retryAfterMs });
-
       const acknowledgment = await UploadReplayBatch.relay(client, command.recordingId, payload);
       if (input.final || acknowledgment.delivery === "finalized") {
         await ReplayRecordingModel.transitionStatus(command.recordingId, ["registering", "open"], "closed");
@@ -84,7 +77,7 @@ export class UploadReplayBatch {
     }
   }
 
-  // Caches what Epic decided, so the local row reads truthfully.
+  // Caches once per recording that Epic closed it, so the local row reads truthfully.
   private static async relay(
     client: EpicClient,
     recordingId: string,
@@ -96,9 +89,7 @@ export class UploadReplayBatch {
       });
     } catch (error) {
       if (error instanceof EpicPublishingError) {
-        if (error.code === "delivery_uncertain") {
-          await ReplayRecordingModel.transitionStatus(recordingId, ["registering", "open"], "quarantined");
-        } else if (error.code === "recording_closed") {
+        if (error.code === "recording_closed") {
           await ReplayRecordingModel.transitionStatus(recordingId, ["registering", "open"], "closed");
         }
       }

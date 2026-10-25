@@ -39,18 +39,18 @@ const limits = {
   maxBatchBytes: 1_048_576,
   maxBatchEvents: 500,
   maxBufferBytes: 5_242_880,
-  maxBufferAgeMs: 30_000,
-  flushIntervalMs: 5_000,
+  maxBufferAgeMs: 60_000,
+  flushIntervalMs: 20_000,
+  flushBytes: 65_536,
   maxAttempts: 3,
 };
 const recording = {
   contractVersion: 1,
   recordingId: RECORDING_ID,
-  recordingToken: "eprc_token",
+  recordingToken: "eprc_1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   tokenExpiresAt: 1_800_000_900_000,
   startedAt: input.startedAt,
   availability: "waiting_for_events",
-  nextSequence: 0,
   limits,
 };
 
@@ -76,7 +76,7 @@ describe("RegisterReplayRecording", () => {
     const result = await RegisterReplayRecording.execute({ actor, input, userAgent: iphone });
 
     expect(result.created).toBe(true);
-    expect(result.registration).toMatchObject({ availability: "waiting_for_events", nextSequence: 0 });
+    expect(result.registration).toMatchObject({ availability: "waiting_for_events" });
     expect(sent()).toMatchObject({
       subjectId: expect.stringMatching(/^sub_/),
       route: "/checkout",

@@ -42,7 +42,7 @@ describe("ReplayRecordingModel", () => {
 
   it("counts a fixed window atomically", async () => {
     const limit = { limit: 2, windowMs: 1_000 };
-    const consume = (now: number) => ReplayRecordingModel.consumeRate("sub_a", "batch", { ...limit, now });
+    const consume = (now: number) => ReplayRecordingModel.consumeRate("sub_a", "report", { ...limit, now });
 
     await expect(consume(10_000)).resolves.toEqual({ allowed: true, retryAfterMs: 0 });
     await expect(consume(10_100)).resolves.toEqual({ allowed: true, retryAfterMs: 0 });
@@ -54,13 +54,13 @@ describe("ReplayRecordingModel", () => {
     const window = { limit: 1, windowMs: 1_000 };
     await ReplayRecordingModel.consumeRate("ip_old", "identity", { ...window, now: 1_000 });
     await ReplayRecordingModel.consumeRate("ip_new", "identity", { ...window, now: 50_000 });
-    await ReplayRecordingModel.consumeRate("sub_old", "batch", { ...window, now: 1_000 });
+    await ReplayRecordingModel.consumeRate("sub_old", "report", { ...window, now: 1_000 });
 
     await ReplayRecordingModel.pruneRate("identity", 10_000);
 
     // A pruned counter starts over; the kept ones are still spent.
     await expect(ReplayRecordingModel.consumeRate("ip_old", "identity", { ...window, now: 50_100 })).resolves.toMatchObject({ allowed: true });
     await expect(ReplayRecordingModel.consumeRate("ip_new", "identity", { ...window, now: 50_100 })).resolves.toMatchObject({ allowed: false });
-    await expect(ReplayRecordingModel.consumeRate("sub_old", "batch", { ...window, now: 1_100 })).resolves.toMatchObject({ allowed: false });
+    await expect(ReplayRecordingModel.consumeRate("sub_old", "report", { ...window, now: 1_100 })).resolves.toMatchObject({ allowed: false });
   });
 });

@@ -125,9 +125,12 @@ the Builder.
 
 - Where the recorder cannot start, the app runs with capture off.
 - Cross-origin iframes, `<canvas>` and `<video>` contents are not recorded.
-- A failed upload is retried with backoff a bounded number of times; events
-  past the buffer limit are dropped rather than held, so a session can reach
-  the Builder with gaps.
+- A batch leaves every 20 s (`flushIntervalMs`) or once 64 KB are queued
+  (`flushBytes`), and immediately when the tab is hidden. A failed upload is
+  retried with backoff a bounded number of times; when every attempt fails the
+  recording is abandoned and a new one starts with a fresh full snapshot.
+  Events held past 60 s (`maxBufferAgeMs`) or the buffer limit are dropped
+  rather than kept.
 - Consent withdrawn, an excluded route, a disabled or expired policy, or an
   unsampled session all record nothing, and say which in the readout at
   `/styleguide/replay`.
@@ -143,7 +146,7 @@ production build of the app being adopted.
 |---|---|
 | Recorder chunk (`@rrweb/record`, dev, unminified) | 187 KB, fetched only when a recording may start — never for a visitor who cannot be recorded |
 | First full snapshot of the page | 374 KB of JSON, of which 239 KB is inlined CSS (dev Tailwind) |
-| Steady state, scrolling for 50 s | 9 batches, 3.8 KB in total |
+| Steady state, scrolling for 50 s | 9 batches, 3.8 KB in total (measured at the former 5 s cadence; at 20 s expect about a third as many) |
 | Long tasks (> 50 ms) during those 50 s | none |
 | JS heap across those 50 s | no growth (58.7 MB → 57.7 MB) |
 

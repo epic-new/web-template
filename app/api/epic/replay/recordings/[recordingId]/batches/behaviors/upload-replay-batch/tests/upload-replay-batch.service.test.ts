@@ -12,7 +12,7 @@ const stranger = { kind: "user", userId: "user-2" } as const;
 
 const batch = (overrides: Record<string, unknown> = {}) => ({
   contractVersion: 1,
-  recordingToken: "eprc_token",
+  recordingToken: "eprc_1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   batchId: BATCH_ID,
   sequence: 0,
   events: [{ type: 4, timestamp: 1, data: {} }],
@@ -26,8 +26,6 @@ const ack = {
   batchId: BATCH_ID,
   sequence: 0,
   delivery: "accepted",
-  availability: "events_received",
-  nextSequence: 1,
 };
 
 describe("UploadReplayBatch", () => {
@@ -64,6 +62,15 @@ describe("UploadReplayBatch", () => {
     expect(sent).toMatchObject({ subjectId: expect.stringMatching(/^sub_/), batchId: BATCH_ID, sequence: 0 });
   });
 
+  it("passes Epic's rate limit through with its retryAfterMs", async () => {
+    upstream.mockResolvedValueOnce(
+      jsonResponse({ contractVersion: 1, error: "x", code: "rate_limited", retryAfterMs: 2_000 }, 429),
+    );
+    await expect(
+      UploadReplayBatch.execute({ actor: owner, recordingId: RECORDING_ID, input: batch() }),
+    ).rejects.toMatchObject({ code: "rate_limited", status: 429, extras: { retryAfterMs: 2_000 } });
+  });
+
   it("answers an unknown or foreign recording identically, without relaying", async () => {
     for (const [actor, recordingId] of [
       [stranger, RECORDING_ID],
@@ -90,15 +97,21 @@ describe("UploadReplayBatch", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
-  it("caches an uncertain delivery but still relays a later retry", async () => {
+  it("keeps no per-batch state: an accepted batch changes no row", async () => {
+    const before = await ReplayRecordingModel.findByRecordingId(RECORDING_ID);
+    await UploadReplayBatch.execute({ actor: owner, recordingId: RECORDING_ID, input: batch() });
+    await expect(ReplayRecordingModel.findByRecordingId(RECORDING_ID)).resolves.toEqual(before);
+  });
+
+  it("caches a closed recording but still relays a later retry", async () => {
     upstream.mockResolvedValueOnce(
-      jsonResponse({ contractVersion: 1, error: "x", code: "delivery_uncertain" }, 409),
+      jsonResponse({ contractVersion: 1, error: "x", code: "recording_closed" }, 409),
     );
     await expect(
       UploadReplayBatch.execute({ actor: owner, recordingId: RECORDING_ID, input: batch() }),
-    ).rejects.toMatchObject({ code: "delivery_uncertain", status: 409 });
+    ).rejects.toMatchObject({ code: "recording_closed", status: 409 });
     await expect(ReplayRecordingModel.findByRecordingId(RECORDING_ID)).resolves.toMatchObject({
-      status: "quarantined",
+      status: "closed",
     });
 
     await expect(

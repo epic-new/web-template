@@ -17,7 +17,7 @@ export class ReplayUploadError extends Error {
 
   constructor(
     readonly code: ReplayUploadErrorCode,
-    readonly extras: { status?: number; expectedSequence?: number; retryAfterMs?: number } = {},
+    readonly extras: { status?: number; retryAfterMs?: number } = {},
   ) {
     super(REPLAY_UPLOAD_ERROR_MESSAGES[code]);
     this.name = "ReplayUploadError";
@@ -29,9 +29,6 @@ export class ReplayUploadError extends Error {
       contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
       error: this.message,
       code: this.code,
-      ...(this.extras.expectedSequence !== undefined
-        ? { expectedSequence: this.extras.expectedSequence }
-        : {}),
       ...(this.extras.retryAfterMs !== undefined ? { retryAfterMs: this.extras.retryAfterMs } : {}),
     };
   }

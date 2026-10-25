@@ -19,8 +19,8 @@ import {
  * redaction feeding the verified-ownership transport. The root provider owns
  * the only instance in a tab.
  *
- * When the transport loses a recording (uncertain delivery, an out-of-order
- * cursor, a closed recording, buffer overrun) the pipeline starts a fresh
+ * When the transport loses a recording (a batch that stayed unanswered after
+ * its attempts, a closed recording, buffer overrun) the pipeline starts a fresh
  * boundary with a new registration and a new FullSnapshot, at most
  * `maxAttempts` times. The budget comes back only after a recording uploads
  * enough batches to prove it works, so a stream that fails right after its
@@ -166,6 +166,11 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       };
       window.addEventListener("pagehide", onPageHide);
       cleanups.push(() => window.removeEventListener("pagehide", onPageHide));
+      const onVisibilityChange = () => {
+        if (document.visibilityState === "hidden") uploader.flushNow();
+      };
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      cleanups.push(() => document.removeEventListener("visibilitychange", onVisibilityChange));
 
       session.start();
       refresh();

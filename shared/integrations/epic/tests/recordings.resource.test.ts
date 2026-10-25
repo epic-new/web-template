@@ -15,18 +15,18 @@ const limits = {
   maxBatchBytes: 1_048_576,
   maxBatchEvents: 500,
   maxBufferBytes: 5_242_880,
-  maxBufferAgeMs: 30_000,
-  flushIntervalMs: 5_000,
+  maxBufferAgeMs: 60_000,
+  flushIntervalMs: 20_000,
+  flushBytes: 65_536,
   maxAttempts: 3,
 };
 const recording = {
   contractVersion: 1,
   recordingId: RECORDING_ID,
-  recordingToken: "eprc_token",
+  recordingToken: "eprc_1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   tokenExpiresAt: 1_800_000_900_000,
   startedAt: 1_800_000_000_000,
   availability: "waiting_for_events",
-  nextSequence: 0,
   limits,
 };
 
@@ -43,7 +43,7 @@ describe("RecordingsResource", () => {
     expect(url).toBe(`https://epic.test/api/replay/v1/recordings/${RECORDING_ID}/capability`);
     expect([...new Headers(init?.headers).keys()].sort()).toEqual(["accept", "authorization", "content-type"]);
     expect(JSON.parse(init?.body as string)).toEqual({ contractVersion: 1, subjectId: "sub_a" });
-    expect(result).toMatchObject({ recordingId: RECORDING_ID, nextSequence: 0 });
+    expect(result).toMatchObject({ recordingId: RECORDING_ID });
   });
 
   it("rejects a success carrying fields outside the contract", async () => {
@@ -54,8 +54,8 @@ describe("RecordingsResource", () => {
   });
 
   it("preserves the status, code and typed fields of a flat error", async () => {
-    const error = { contractVersion: 1, error: "x", code: "out_of_order", expectedSequence: 4 };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(error, 409)));
+    const error = { contractVersion: 1, error: "x", code: "rate_limited", retryAfterMs: 1_500 };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(error, 429)));
 
     const failure = await RecordingsResource.appendBatch(client, RECORDING_ID, {
       contractVersion: 1,
@@ -68,6 +68,6 @@ describe("RecordingsResource", () => {
     }).catch((caught: unknown) => caught);
 
     expect(failure).toBeInstanceOf(EpicPublishingError);
-    expect(failure).toMatchObject({ status: 409, code: "out_of_order", expectedSequence: 4 });
+    expect(failure).toMatchObject({ status: 429, code: "rate_limited", retryAfterMs: 1_500 });
   });
 });

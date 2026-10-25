@@ -23,8 +23,9 @@ export const REPLAY_RECORDING_LIMITS = {
   maxBatchBytes: 1_048_576,
   maxBatchEvents: 500,
   maxBufferBytes: 5_242_880,
-  maxBufferAgeMs: 30_000,
-  flushIntervalMs: 5_000,
+  maxBufferAgeMs: 60_000,
+  flushIntervalMs: 20_000,
+  flushBytes: 65_536,
   maxAttempts: 3,
 } as const;
 
@@ -57,6 +58,7 @@ export const replayRecordingLimitsSchema = z
     maxBufferBytes: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.maxBufferBytes),
     maxBufferAgeMs: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.maxBufferAgeMs),
     flushIntervalMs: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.flushIntervalMs),
+    flushBytes: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.flushBytes),
     maxAttempts: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.maxAttempts),
   })
   .strict();
