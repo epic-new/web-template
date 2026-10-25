@@ -112,3 +112,46 @@ recording that is already sampled in.
   duration. Request and response headers and bodies are never included, and
   the replay configuration, ingestion and report endpoints (`/api/epic/replay/*`)
   are never diagnosed.
+
+## Upload and reports
+
+The recorder feeds `createReplayRecordingPipeline` (`lib/replay/`), mounted once
+by `EpicReplayProvider` in the root layout. Nothing leaves the browser except
+through this application's own routes under `/api/epic/replay`, which relay to
+Epic with the server's publishing credential.
+
+- **Ownership.** Project and environment come from the credential, the subject
+  from the server's identity: `sub_` plus an HMAC of the signed-in user id (or a
+  protected visitor id) under `BETTER_AUTH_SECRET`. The browser never sends a
+  subject, project, environment or Epic id, and the routes reject them. Rotating
+  the publishing token does not change a subject.
+- **Anonymous visitors** are off by default. `EPIC_REPLAY_ANONYMOUS_CAPTURE=allow`
+  (recording) and `EPIC_REPLAY_ANONYMOUS_REPORTING=allow` (reports) let
+  `POST /api/epic/replay/identity` mint a signed, HttpOnly visitor cookie scoped
+  to `/api/epic/replay`. Registration and reports never mint one; a client that
+  blocks the cookie fails closed.
+- **Registration first.** Events wait in bounded memory (`maxBufferBytes`,
+  `maxBufferAgeMs`, measured on the monotonic clock) until Epic returns a
+  recording id; `startedAt` is the first event's timestamp and survives retries.
+- **Batches.** One request in flight; each batch's id, sequence and events are
+  frozen before the first attempt and only that batch is retried (up to
+  `maxAttempts`, backoff 500 ms, 1 s, 2 s). An expired capability is renewed and
+  the identical batch resent. A single event larger than `maxBatchBytes` ends the
+  recording as "snapshot too large"; nothing is truncated.
+- **Uncertain delivery** (`delivery_uncertain`, `out_of_order`, a closed
+  recording) is never resent or renumbered: the recording is marked incomplete and,
+  within a restart budget of `maxAttempts` that refills only after a recording
+  uploads two batches, a new recording starts with a new key and FullSnapshot.
+- **Evidence stays unverified.** A registration or accepted batch is never
+  presented as playable; only Epic can verify playback.
+- **Reports** (`POST /api/epic/replay/reports`) work with capture off. The form
+  freezes the moment, route, build and recording reference (with its
+  recording-relative millisecond offset) when it opens, keeps the draft on
+  failure, and resends the same idempotency key. The button and form are
+  `data-private`.
+- **Markers.** `useEpicReplay().event(name, payload)` records
+  `epic.screen.viewed`, `epic.behavior.started|succeeded|failed` and
+  `epic.bug.reported` with only `behaviorId`, `occurrenceId` and `reportId`;
+  navigation (`epic.navigate`) and uncaught errors / unhandled rejections
+  (`epic.error`) are recorded by the provider. Without a running recording they
+  do nothing.
