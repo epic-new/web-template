@@ -56,9 +56,9 @@ describe("capture context", () => {
     expect(
       deriveReplayCaptureContext({ browser: {}, os: {}, device: {} }, null),
     ).toEqual({
-      browser: { name: "Unknown", majorVersion: null },
-      os: { name: "Unknown", majorVersion: null },
-      deviceClass: "unknown",
+      browser: { name: "Other", majorVersion: null },
+      os: { name: "Other", majorVersion: null },
+      deviceClass: "other",
       viewport: null,
     });
   });

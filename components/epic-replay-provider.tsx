@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
 
+import { ReplayConsentBanner } from "@/components/replay-consent-banner";
 import { ReplayReportButton } from "@/components/replay-report-button";
 import { authClient } from "@/lib/auth/client";
 import { disabledReplayConfig } from "@/lib/replay/replay-config.contract";
@@ -77,6 +79,15 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
   const session = authClient.useSession();
   const userId = session.data?.user?.id ?? null;
   const identityPending = session.isPending;
+  const pathname = usePathname();
+  const refetchSession = session.refetch;
+
+  // Sign-in, sign-up and sign-out are server actions that redirect, so the
+  // client session store never hears about them: re-read it on every
+  // navigation, which is what changes the subject a recording belongs to.
+  useEffect(() => {
+    void refetchSession();
+  }, [pathname, refetchSession]);
 
   // Once capture has been enabled for this page it stays armed: the capture
   // session blocks and resumes by policy, so a refresh gap does not tear the
@@ -145,6 +156,7 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
   return (
     <EpicReplayContext.Provider value={value}>
       {children}
+      {armed ? <ReplayConsentBanner /> : null}
       {reportingEnabled ? <ReplayReportButton release={release} /> : null}
     </EpicReplayContext.Provider>
   );
