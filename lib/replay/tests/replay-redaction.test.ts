@@ -136,6 +136,10 @@ describe("sanitizeCssText", () => {
     expect(sanitizeCssText(String.raw`@im\70ort "a.css?\74oken=synthetic-import";`)).toBe('@import "[redacted]";');
     const selector = String.raw`.hover\:bg-blue-500:hover,.w-\[10px\]{width:10px;background:url(/public.png)}`;
     expect(sanitizeCssText(selector)).toBe(selector);
+    const quoted = String.raw`[data-label="url(a\)b)"] { color:red } .a::after{content:'url(a\)b)'}`;
+    expect(sanitizeCssText(quoted)).toBe(quoted);
+    expect(sanitizeCssText(String.raw`/* "quoted comment" */ .a{background:url(/a?\74oken=synthetic-escape)}`))
+      .toBe('/* "quoted comment" */ .a{background:url("[redacted]")}');
   });
 
   it("redacts credentials in url(), @import and relative pairs and keeps the rule", () => {

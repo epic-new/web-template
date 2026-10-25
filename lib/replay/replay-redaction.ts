@@ -130,8 +130,27 @@ function redactEscapedCssResources(css: string): string {
   let copied = 0;
   // Match identifiers without a required suffix: a long plain text node is
   // scanned once, rather than retrying a failing `url(` match at each letter.
-  const identifiers = new RegExp(CSS_IDENTIFIER);
-  for (let token = identifiers.exec(css); token; token = identifiers.exec(css)) {
+  const identifiers = new RegExp(CSS_IDENTIFIER.source, "iy");
+  let cursor = 0;
+  while (cursor < css.length) {
+    // An apparent function inside a selector/content string is text. Import
+    // strings are handled explicitly below, before this outer scanner sees them.
+    if (css[cursor] === '"' || css[cursor] === "'") {
+      const quote = css[cursor++];
+      while (cursor < css.length) {
+        if (css[cursor] === "\\") { cursor += 2; continue; }
+        if (css[cursor++] === quote) break;
+      }
+      continue;
+    }
+    if (css.startsWith("/*", cursor)) {
+      const close = css.indexOf("*/", cursor + 2);
+      cursor = close === -1 ? css.length : close + 2;
+      continue;
+    }
+    identifiers.lastIndex = cursor;
+    const token = identifiers.exec(css);
+    if (!token) { cursor++; continue; }
     const name = token[0].replace(CSS_ESCAPE, (_, hex: string | undefined, escaped: string | undefined) =>
       hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : escaped ?? "").toLowerCase();
     const bodyAt = identifiers.lastIndex;
@@ -164,7 +183,7 @@ function redactEscapedCssResources(css: string): string {
       parts.push(css.slice(copied, token.index), replacement);
       copied = end;
     }
-    identifiers.lastIndex = Math.max(end, bodyAt);
+    cursor = Math.max(end, bodyAt);
   }
   return copied === 0 ? css : parts.join("") + css.slice(copied);
 }
