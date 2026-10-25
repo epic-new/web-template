@@ -43,7 +43,8 @@ const TARGETS: { value: ReplayUploadTarget; label: string; description: string }
  * synthetic fixture. Nothing here is evidence that a recording is playable.
  */
 export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'second' }) {
-  const { state, setTarget, setFixtureMode, start, stop, restart, emitCustomEvent, sendForgedRequests } = usePreviewReplayUploadControls()
+  const { state, setTarget, setFixtureMode, start, stop, restart, runSuccessfulExample,
+    runFailedExample, raiseBrowserError, rejectPromise, freezeEvidence, sendForgedRequests } = usePreviewReplayUploadControls()
   const { consent, grant, withdraw, notice } = useManageReplayConsent()
   const synthetic = state.target === 'synthetic'
 
@@ -132,9 +133,6 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
               <Button variant="outline" onClick={restart}>
                 Restart recording
               </Button>
-              <Button variant="secondary" onClick={emitCustomEvent}>
-                Emit custom event
-              </Button>
               <Button variant="secondary" onClick={() => void sendForgedRequests()}>
                 Send forged requests
               </Button>
@@ -144,6 +142,32 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
                 <AlertDescription>{notice}</AlertDescription>
               </Alert>
             )}
+          </div>
+
+          <div className="grid gap-6 border-y border-border py-6 md:grid-cols-2">
+            <section className="space-y-3" aria-labelledby="replay-example-heading">
+              <h3 id="replay-example-heading" className="text-sm font-semibold text-foreground">Behavior examples</h3>
+              <p className="text-xs text-muted-foreground">
+                Parse fixed synthetic data, then show the operation result and its recording markers.
+                The operation works even when capture is unavailable.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" onClick={runSuccessfulExample}>Run successful example</Button>
+                <Button variant="outline" onClick={runFailedExample}>Run failed example</Button>
+                <Button variant="outline" onClick={freezeEvidence}>Freeze evidence reference</Button>
+              </div>
+            </section>
+            <section className="space-y-3" aria-labelledby="replay-failure-heading">
+              <h3 id="replay-failure-heading" className="text-sm font-semibold text-foreground">Browser failure examples</h3>
+              <p className="text-xs text-muted-foreground">
+                Raise fixed synthetic failures. The browser may show its normal error overlay.
+                Automatic markers use the Application relay provider.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={raiseBrowserError}>Raise browser error</Button>
+                <Button variant="outline" onClick={rejectPromise}>Reject promise</Button>
+              </div>
+            </section>
           </div>
 
           <ReplayUploadReadout />
@@ -165,6 +189,13 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
             className="text-sm text-primary underline-offset-4 hover:underline"
           >
             Navigate
+          </Link>
+          <Link
+            href={`${page === 'first' ? REPLAY_UPLOAD_PATH : REPLAY_UPLOAD_SECOND_PATH}?synthetic=example#replay-query-hash`}
+            id="replay-query-hash"
+            className="ml-4 text-sm text-primary underline-offset-4 hover:underline"
+          >
+            Query/hash only
           </Link>
         </CardContent>
       </Card>

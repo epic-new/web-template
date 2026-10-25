@@ -1,6 +1,7 @@
 import { EventType, IncrementalSource, type eventWithTime } from "@rrweb/types";
 
 import { REDACTED, sanitizeCssText, sanitizeReplayPayload, sanitizeUrl } from "./replay-redaction";
+import { parseReplayMarker } from "./replay-marker.contract";
 
 /**
  * Sanitizes one rrweb event before it enters a buffer. rrweb has already
@@ -174,7 +175,19 @@ export function createReplayEventSanitizer() {
   }
 
   return {
-    sanitize(event: eventWithTime): eventWithTime {
+    sanitize(event: eventWithTime): eventWithTime | null {
+      // Project Epic data before cloning: unknown metadata may contain cycles,
+      // accessors or report text that must never enter a serialized event.
+      if (event.type === EventType.Custom) {
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(event.data, "tag");
+          if (descriptor && !("value" in descriptor)) return null;
+          if (typeof descriptor?.value === "string" && descriptor.value.startsWith("epic.")) {
+            const parsed = parseReplayMarker(event.data);
+            return parsed.success ? { type: EventType.Custom, timestamp: event.timestamp, data: parsed.marker } : null;
+          }
+        } catch { return null; }
+      }
       const copy = JSON.parse(JSON.stringify(event)) as eventWithTime & { data: Json };
       const data = copy.data as Json;
 
@@ -192,6 +205,12 @@ export function createReplayEventSanitizer() {
           sanitizeIncremental(data);
           break;
         case EventType.Custom:
+          // A custom toJSON implementation cannot manufacture an unvalidated
+          // reserved tag while the generic event is copied.
+          if (typeof data.tag === "string" && data.tag.startsWith("epic.")) {
+            const parsed = parseReplayMarker(data);
+            return parsed.success ? { type: EventType.Custom, timestamp: copy.timestamp, data: parsed.marker } : null;
+          }
           data.tag = typeof data.tag === "string" ? data.tag.slice(0, 128) : "custom";
           data.payload = sanitizeReplayPayload(data.payload);
           break;
@@ -218,6 +237,6 @@ export type ReplayEventSanitizer = ReturnType<typeof createReplayEventSanitizer>
  * Stateless form for a single event: without a snapshot to learn from, every
  * value-only mutation and input value is treated as secret.
  */
-export function sanitizeReplayEvent(event: eventWithTime): eventWithTime {
+export function sanitizeReplayEvent(event: eventWithTime): eventWithTime | null {
   return createReplayEventSanitizer().sanitize(event);
 }

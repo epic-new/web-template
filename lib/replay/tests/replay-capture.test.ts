@@ -96,6 +96,32 @@ describe("createReplayCaptureSession", () => {
     document.body.innerHTML = "";
   });
 
+  it("emits actual pinned-recorder markers only through the permitted wrapper and contains SDK failure", async () => {
+    const buffer = createReplayMemoryBuffer(REPLAY_RECORDING_LIMITS);
+    const session = createReplayCaptureSession({ sink: buffer, getPolicy: () => activeReplayPolicy(),
+      subscribePolicy: () => () => {}, sampler: always, preflightMarker: () => null });
+    dispose = () => session.dispose();
+    const marker = { tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic.example" } };
+    expect(session.track(marker)).toMatchObject({ status: "dropped" });
+    epicReplayConsent.grant(); session.start(); await flush();
+    const before = buffer.events().length;
+    expect(session.track(marker)).toEqual({ status: "emitted" });
+    const captured = buffer.events().slice(before).find(({ event }) => event.type === EventType.Custom)!.event;
+    expect(captured).toMatchObject({ type: EventType.Custom, timestamp: expect.any(Number), data: marker });
+    const count = () => buffer.events().filter(({ event }) => event.type === EventType.Custom).length;
+    const n = count();
+    rrwebRecord.addCustomEvent("epic.bug.reported", { version: 1, reportId: "synthetic" });
+    rrwebRecord.addCustomEvent({ toJSON: () => "epic.bug.reported" } as unknown as string, { version: 1, reportId: "synthetic" });
+    expect(count()).toBe(n);
+    const sdk = vi.spyOn(rrwebRecord, "addCustomEvent").mockImplementation(() => { throw new Error("synthetic private telemetry failure"); });
+    expect(session.track(marker)).toEqual({ status: "dropped", reason: "recorder_unavailable" });
+    sdk.mockRestore();
+    expect(session.track(marker)).toEqual({ status: "emitted" });
+    epicReplayConsent.withdraw();
+    expect(session.track(marker)).toMatchObject({ status: "dropped" });
+    expect(buffer.events()).toHaveLength(0);
+  });
+
   it("records nothing before consent", () => {
     const fake = fakeRecord();
     const { session, buffer } = setup({ record: fake.record });

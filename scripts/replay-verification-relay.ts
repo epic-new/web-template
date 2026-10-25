@@ -7,12 +7,14 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { z } from "zod";
 import { REPLAY_RECORDING_LIMITS } from "../lib/replay/replay-config.contract";
+import { parseReplayMarker, type ReplayMarker } from "../lib/replay/replay-marker.contract";
 import { ReplayUploadError, type ReplayRecordingCapability } from "../lib/replay/replay-upload-contract";
 import { createSyntheticEpi210 } from "../lib/replay/tests/synthetic-epi210.core";
 
 export const SYNTHETIC_RELAY_TOKEN = "synthetic-web4-local-only";
 export const SYNTHETIC_RELAY_PROJECT = "synthetic-web4";
 export const SYNTHETIC_RELAY_MAX_REQUESTS = 10_000;
+export const SYNTHETIC_RELAY_MAX_MARKERS = 50;
 const MAX_BODY_BYTES = REPLAY_RECORDING_LIMITS.maxBatchBytes;
 const faults = z.enum(["accept", "advanced_cursor_next_retry", "close_next_append", "lose_next_receipt", "lose_next_registration", "offline", "fail_503", "tiny_batch"]);
 const controlSchema = z.object({ mode: faults }).strict();
@@ -32,6 +34,17 @@ interface CallDiagnostic {
   final: boolean;
   status: number | "lost_receipt";
   code: string | null;
+}
+interface MarkerDiagnostic {
+  recordingId: string;
+  batchId: string;
+  sequence: number;
+  eventIndex: number;
+  timestamp: number;
+  startedAt: number;
+  offsetMs: number;
+  tag: ReplayMarker["tag"];
+  payload: ReplayMarker["payload"];
 }
 
 const response = (body: unknown, status = 200) => Response.json(body, {
@@ -75,9 +88,30 @@ export function createReplayVerificationRelay({ now = Date.now }: { now?: () => 
   const diagnostics = new Map<string, Diagnostic>();
   const subjects = new Map<string, string>();
   const calls: CallDiagnostic[] = [];
+  const markers: MarkerDiagnostic[] = [];
   let mode: Fault = "accept";
   let requests = 0;
   const resetFault = () => { mode = "accept"; fixture.setMode("accept"); };
+
+  /** Only new synthetic provider appends reach here; receipt retries add nothing. */
+  function summarizeMarkers(recordingId: string, payload: unknown) {
+    const context = diagnostics.get(recordingId);
+    if (!context || !Number.isSafeInteger(context.startedAt)) return;
+    const batch = payload as { batchId: string; sequence: number; events: { type: number; timestamp: number; data: unknown }[] };
+    for (const [eventIndex, event] of batch.events.entries()) {
+      if (event.type !== 5 || !Number.isSafeInteger(event.timestamp)) continue;
+      const offsetMs = event.timestamp - context.startedAt;
+      if (!Number.isSafeInteger(offsetMs) || offsetMs < 0) continue;
+      const parsed = parseReplayMarker(event.data);
+      if (!parsed.success) continue;
+      // The contract projects the approved fields. Never retain the incoming
+      // event, unknown metadata, error text, capability or subject identity.
+      markers.push({ recordingId, batchId: batch.batchId, sequence: batch.sequence, eventIndex,
+        timestamp: event.timestamp, startedAt: context.startedAt, offsetMs,
+        tag: parsed.marker.tag, payload: parsed.marker.payload });
+      if (markers.length > SYNTHETIC_RELAY_MAX_MARKERS) markers.shift();
+    }
+  }
 
   function policy() {
     const issuedAt = now();
@@ -103,7 +137,8 @@ export function createReplayVerificationRelay({ now = Date.now }: { now?: () => 
       return response({ synthetic: true, scope: "local fixture; no Cloud or playback evidence", mode, requests,
         recordings: fixture.recordings().map((row) => ({ ...diagnostics.get(row.recordingId), status: row.status,
           nextSequence: row.nextSequence, availability: row.availability })),
-        calls, limits: { recordings: 100, receipts: 2_000, calls: 128, requests: SYNTHETIC_RELAY_MAX_REQUESTS },
+        calls, markers, limits: { recordings: 100, receipts: 2_000, calls: 128,
+          markers: SYNTHETIC_RELAY_MAX_MARKERS, requests: SYNTHETIC_RELAY_MAX_REQUESTS },
       });
     }
     if (request.method === "GET" && url.pathname === "/api/replay/v1/runtime-config") return response(policy());
@@ -123,6 +158,7 @@ export function createReplayVerificationRelay({ now = Date.now }: { now?: () => 
     const match = /^\/api\/replay\/v1\/recordings\/([^/]+)\/batches$/.exec(url.pathname);
     const recordingId = match?.[1] ?? null;
     if (recordingId && mode === "close_next_append") { fixture.closeRecording(recordingId); resetFault(); }
+    const priorAppends = fixture.providerAppends.length;
     let answer = fixture.central(url.pathname, payload);
     if (!answer) return response({ synthetic: true, error: "Not found" }, 404);
     if (url.pathname === "/api/replay/v1/recordings" && answer.status < 300) {
@@ -139,6 +175,7 @@ export function createReplayVerificationRelay({ now = Date.now }: { now?: () => 
       if (mode === "lose_next_registration") { resetFault(); return null; }
     }
     if (recordingId) {
+      if (answer.status === 200 && fixture.providerAppends.length > priorAppends) summarizeMarkers(recordingId, payload);
       const parsed = payload as { sequence?: unknown; events?: unknown; final?: unknown };
       const events = Array.isArray(parsed.events) ? parsed.events.slice(0, 2).filter((event) =>
         event && typeof event === "object" && Number.isInteger(event.type) && Number.isInteger(event.timestamp)) : [];

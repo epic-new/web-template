@@ -11,6 +11,7 @@ import { buildReplayRecordOptions } from "./replay-record-options";
 import { jsonByteLength } from "./replay-redaction";
 import { normalizeReplayPath } from "./replay-routes";
 import { replaySampler, type ReplaySampler } from "./replay-sampling";
+import { parseReplayMarker, type ReplayMarker, type ReplayTrackResult, type ReplayTrackDropReason } from "./replay-marker.contract";
 
 /**
  * The privacy-enforcing wrapper around `@rrweb/record`. See
@@ -56,6 +57,8 @@ export interface ReplayCaptureSessionOptions {
   getPathname?: () => string;
   /** Root-owned identity/producer gate, checked again for every event. */
   getCaptureAllowed?: () => boolean;
+  preflightMarker?: (event: eventWithTime, boundary: number) => ReplayTrackDropReason | null;
+  onMarker?: (marker: ReplayMarker, timestamp: number, boundary: number) => void;
 }
 
 export function createReplayCaptureSession({
@@ -67,6 +70,8 @@ export function createReplayCaptureSession({
   record = rrwebRecord,
   getPathname = () => window.location.pathname,
   getCaptureAllowed = () => true,
+  preflightMarker = () => "recording_unavailable",
+  onMarker,
 }: ReplayCaptureSessionOptions) {
   let state: ReplayCaptureState = { status: "blocked", reason: "policy_disabled", boundary: 0 };
   let active: {
@@ -84,6 +89,7 @@ export function createReplayCaptureSession({
   let pendingStart: ReturnType<typeof setTimeout> | undefined;
   let removeReadyListeners: (() => void) | undefined;
   let startGeneration = 0;
+  let markerEmission: { marker: ReplayMarker; result: ReplayTrackResult } | null = null;
   const cleanups: (() => void)[] = [];
   const listeners = new Set<() => void>();
 
@@ -217,7 +223,15 @@ export function createReplayCaptureSession({
         return;
       }
       try {
+        const custom = event.type === EventType.Custom ? event.data : null;
+        const reserved = custom && typeof custom.tag === "string" && custom.tag.startsWith("epic.");
+        // Reserved markers enter only through this owner's wrapper, never an SDK bypass.
+        if (reserved && (!markerEmission || custom.tag !== markerEmission.marker.tag || custom.payload !== markerEmission.marker.payload)) return;
         const sanitized = sanitizer.sanitize(event);
+        if (!sanitized) return;
+        // Generic toJSON hooks must not manufacture a reserved marker after
+        // the raw-event ownership check above.
+        if (sanitized.type === EventType.Custom && sanitized.data.tag.startsWith("epic.") && !reserved) return;
         if (!session.opened) {
           if (Math.max(performance.now() - openingMono, Date.now() - openingWall, 0) >= openingAge ||
               !Number.isSafeInteger(event.timestamp) || event.timestamp < 0 ||
@@ -263,7 +277,16 @@ export function createReplayCaptureSession({
           }
           return;
         }
+        if (reserved && markerEmission) {
+          const reason = preflightMarker(sanitized, boundary);
+          if (reason) { markerEmission.result = { status: "dropped", reason }; return; }
+        }
         sink.push(sanitized, boundary);
+        if (reserved && markerEmission && active === session && captureAllowed()) {
+          markerEmission.result = { status: "emitted" };
+          // A diagnostics subscriber must never break the recorder or its receipt.
+          try { onMarker?.(markerEmission.marker, sanitized.timestamp, boundary); } catch { /* Optional diagnostics. */ }
+        }
       } catch {
         fail();
       }
@@ -341,7 +364,35 @@ export function createReplayCaptureSession({
     });
   }
 
+  function markerBlockReason(): ReplayTrackDropReason | null {
+    try {
+      if (!started || !captureAllowed() || !permission(getPathname()).result.allowed) return "capture_not_permitted";
+      return active?.opened && state.status === "capturing" ? null : "recording_unavailable";
+    } catch { return "capture_not_permitted"; }
+  }
+
   return {
+    markerBlockReason,
+    /** Synchronous rrweb emission, with no deferred payload or fabricated timestamp. */
+    track(input: unknown): ReplayTrackResult {
+      try {
+        const blocked = markerBlockReason();
+        if (blocked) return { status: "dropped", reason: blocked };
+        if (markerEmission) return { status: "dropped", reason: "rate_limited" };
+        const parsed = parseReplayMarker(input);
+        if (!parsed.success) return { status: "dropped", reason: "invalid_payload" };
+        // Conservative timestamp width for wire capacity before invoking rrweb.
+        const reason = preflightMarker({ type: EventType.Custom, timestamp: Number.MAX_SAFE_INTEGER, data: parsed.marker } as eventWithTime, state.boundary);
+        if (reason) return { status: "dropped", reason };
+        if (typeof record.addCustomEvent !== "function") return { status: "dropped", reason: "recorder_unavailable" };
+        const receipt = { marker: parsed.marker, result: { status: "dropped", reason: "recorder_unavailable" } as ReplayTrackResult };
+        markerEmission = receipt;
+        try { record.addCustomEvent(parsed.marker.tag, parsed.marker.payload); }
+        finally { markerEmission = null; }
+        return receipt.result;
+      } catch { markerEmission = null; return { status: "dropped", reason: "recorder_unavailable" }; }
+    },
+
     start(): void {
       if (started || typeof window === "undefined") return;
       started = true;

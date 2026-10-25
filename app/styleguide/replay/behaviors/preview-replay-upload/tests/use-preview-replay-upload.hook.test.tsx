@@ -112,6 +112,14 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
       bufferedEvents: 0,
     });
     expect(fetch).not.toHaveBeenCalled();
+    act(() => { result.current.runSuccessfulExample(); });
+    expect(result.current.state.example).toMatchObject({ outcome: "succeeded", value: 10,
+      started: { status: "dropped", reason: "provider_unavailable" }, completed: { status: "dropped", reason: "provider_unavailable" } });
+    act(() => { result.current.runFailedExample(); result.current.freezeEvidence(); });
+    expect(result.current.state.example).toMatchObject({ outcome: "failed", value: null });
+    expect(result.current.state.frozenEvidence).toBeNull();
+    expect(result.current.state.markers).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
 
     await act(() => result.current.sendForgedRequests());
     expect(result.current.state.forged.map(({ status, code }) => [status, code])).toEqual([
@@ -119,6 +127,43 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
       [503, "not_configured"],
       [503, "not_configured"],
     ]);
+  });
+
+  it("captures successful and failed local occurrences and keeps frozen evidence across restart", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
+    const { result } = renderHook(() => usePreviewReplayUpload());
+    act(() => { result.current.setTarget("synthetic"); epicReplayConsent.grant(); result.current.start(); });
+    await settle(5_000);
+    act(() => { result.current.runSuccessfulExample(); });
+    expect(result.current.state.example).toMatchObject({ outcome: "succeeded", value: 10,
+      started: { status: "emitted" }, completed: { status: "emitted" } });
+    const success = result.current.state.example!;
+    act(() => { result.current.runFailedExample(); result.current.freezeEvidence(); });
+    expect(result.current.state.example).toMatchObject({ outcome: "failed", value: null,
+      started: { status: "emitted" }, completed: { status: "emitted" } });
+    const failed = result.current.state.example!;
+    expect(success.occurrenceId).not.toBe(failed.occurrenceId);
+    expect(result.current.state.markers.filter((marker) => marker.tag.startsWith("epic.behavior.")).map((marker) => ({ tag: marker.tag, payload: marker.payload })))
+      .toEqual([
+        { tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId: success.occurrenceId } },
+        { tag: "epic.behavior.succeeded", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId: success.occurrenceId } },
+        { tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId: failed.occurrenceId } },
+        { tag: "epic.behavior.failed", payload: { version: 1, behaviorId: "synthetic.example", occurrenceId: failed.occurrenceId, code: "synthetic.invalid_json" } },
+      ]);
+    const frozen = result.current.state.frozenEvidence;
+    expect(frozen).toMatchObject({ recordingId: result.current.state.pipeline.upload.current?.recordingId, release: null });
+    expect(frozen!.offsetMs).toBe(frozen!.capturedAt - frozen!.startedAt);
+    expect(Number.isSafeInteger(frozen!.offsetMs)).toBe(true);
+    expect(frozen!.offsetMs).toBeGreaterThan(0);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    await settle(5_000);
+    act(() => result.current.restart());
+    await settle(5_000);
+    expect(result.current.state.frozenEvidence).toBe(frozen);
+    expect(result.current.state.pipeline.upload.current?.recordingId).not.toBe(frozen?.recordingId);
+    act(() => { epicReplayConsent.withdraw(); result.current.runSuccessfulExample(); });
+    expect(result.current.state.example).toMatchObject({ outcome: "succeeded", value: 10, started: { status: "dropped" }, completed: { status: "dropped" } });
+    expect(result.current.state.frozenEvidence).toBe(frozen);
   });
 
   it("uses the one root pipeline for application capture and exclusively displaces it for synthetic capture", async () => {

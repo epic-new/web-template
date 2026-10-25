@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createReplayVerificationRelay, startReplayVerificationRelay, SYNTHETIC_RELAY_TOKEN } from "../replay-verification-relay";
+import { createReplayVerificationRelay, startReplayVerificationRelay, SYNTHETIC_RELAY_MAX_MARKERS, SYNTHETIC_RELAY_TOKEN } from "../replay-verification-relay";
 import { registrationBody } from "../../lib/replay/tests/replay-relay.fixture";
 import { REPLAY_RECORDING_LIMITS } from "../../lib/replay/replay-config.contract";
 
@@ -66,6 +66,65 @@ describe("synthetic loopback verification relay", () => {
     const closed = await send(path, { ...batch, batchId: crypto.randomUUID(), sequence: 2 });
     expect(await closed!.json()).toMatchObject({ code: "recording_closed" });
     expect((await send("/api/replay/v1/recordings", payload))!.status).toBe(409);
+  });
+
+  it("summarizes only safe committed markers in original milliseconds and deduplicates receipt retries after eviction", async () => {
+    const { send, register } = setup();
+    const { capability, payload } = await register();
+    const path = `/api/replay/v1/recordings/${capability.recordingId}/batches`;
+    const occurrenceId = crypto.randomUUID();
+    const marker = (offsetMs: number, context: Record<string, unknown> = {}) => ({ type: 5,
+      timestamp: payload.startedAt + offsetMs, data: { tag: "epic.behavior.started",
+        payload: { version: 1, behaviorId: "synthetic-operation", occurrenceId, ...context } } });
+    const batch = { contractVersion: 1, subjectId: payload.subjectId, recordingToken: capability.recordingToken,
+      batchId: crypto.randomUUID(), sequence: 0, final: false,
+      events: [
+        { type: 4, timestamp: payload.startedAt, data: {} },
+        { type: 2, timestamp: payload.startedAt, data: {} },
+        marker(1_234, { message: "never-keep-message", reportText: "never-keep-report", token: "never-keep-token" }),
+        marker(1_235, { version: 99 }),
+        marker(1_236, { behaviorId: "oversized-secret".repeat(200) }),
+        marker(-1),
+        { type: 5, timestamp: payload.startedAt + 1_237, data: { tag: "unrelated-secret-tag", payload: { value: "never-keep-custom" } } },
+      ],
+    };
+
+    await send("/__synthetic/control", { mode: "lose_next_receipt" });
+    expect(await send(path, batch)).toBeNull();
+    const read = async () => await (await send("/__synthetic/state"))!.json();
+    const first = await read();
+    expect(first.markers).toEqual([{ recordingId: capability.recordingId, batchId: batch.batchId,
+      sequence: 0, eventIndex: 2, timestamp: payload.startedAt + 1_234, startedAt: payload.startedAt,
+      offsetMs: 1_234, tag: "epic.behavior.started", payload: { version: 1, behaviorId: "synthetic-operation", occurrenceId } }]);
+    expect((await send(path, batch))!.status).toBe(200);
+    expect((await read()).markers).toEqual(first.markers);
+    for (const secret of [payload.subjectId, capability.recordingToken, "never-keep-", "oversized-secret", "unrelated-secret-tag"])
+      expect(JSON.stringify(first)).not.toContain(secret);
+
+    const later = { ...batch, batchId: crypto.randomUUID(), sequence: 1,
+      events: Array.from({ length: SYNTHETIC_RELAY_MAX_MARKERS + 5 }, (_, index) => marker(2_000 + index, { occurrenceId: crypto.randomUUID() })) };
+    expect((await send(path, { ...later, subjectId: "sub_wrong-owner" }))!.status).toBe(403);
+    expect((await read()).markers).toEqual(first.markers);
+    expect((await send(path, later))!.status).toBe(200);
+    const bounded = await read();
+    expect(bounded.markers).toHaveLength(SYNTHETIC_RELAY_MAX_MARKERS);
+    expect(bounded.markers[0]).toMatchObject({ batchId: later.batchId, eventIndex: 5, offsetMs: 2_005 });
+    expect(bounded.limits.markers).toBe(SYNTHETIC_RELAY_MAX_MARKERS);
+
+    // The first receipt remains committed even when every one of its summaries
+    // has left the ring. An old retry cannot resurrect the evicted marker.
+    expect((await send(path, batch))!.status).toBe(200);
+    expect((await read()).markers).toEqual(bounded.markers);
+
+    const other = await register();
+    const otherPath = `/api/replay/v1/recordings/${other.capability.recordingId}/batches`;
+    expect((await send(otherPath, { ...later, subjectId: other.payload.subjectId,
+      recordingToken: other.capability.recordingToken, batchId: crypto.randomUUID(), sequence: 0,
+      events: later.events.slice(0, 30) }))!.status).toBe(200);
+    const shared = await read();
+    expect(shared.markers).toHaveLength(SYNTHETIC_RELAY_MAX_MARKERS);
+    expect(shared.markers.filter((item: { recordingId: string }) => item.recordingId === capability.recordingId)).toHaveLength(20);
+    expect(shared.markers.filter((item: { recordingId: string }) => item.recordingId === other.capability.recordingId)).toHaveLength(30);
   });
 
   it("rejects ownership/shape faults, foreign origins, credentials, and oversized bodies", async () => {
