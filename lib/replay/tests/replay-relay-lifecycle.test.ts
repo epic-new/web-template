@@ -18,7 +18,7 @@ import { createReplayDocumentOwners } from "../replay-document-owner";
 import { createReplayHandoff, REPLAY_HANDOFF_STORAGE_KEY, type ReplayHandoffLedgerRecord, type ReplayHandoffLedger } from "../replay-handoff";
 import { epicReplayConsent } from "../replay-consent";
 import type { ReplayLockManager } from "../replay-ownership";
-import type { ReplayFetch } from "../replay-upload-contract";
+import { replayRegistrationRequestSchema, type ReplayFetch } from "../replay-upload-contract";
 import { replayRequest, routeParams, signUp } from "./replay-route.fixture";
 
 describe("root runtime through real BFF and document-independent synthetic relay", () => {
@@ -75,8 +75,8 @@ describe("root runtime through real BFF and document-independent synthetic relay
       options?.emit?.({ type: 2, timestamp: Date.now(), data: { node: { type: 0, id: 1, childNodes: [] }, initialOffset: { left: 0, top: 0 } } } as unknown as eventWithTime);
       return () => {};
     }) as typeof rrwebRecord;
-    const create = (type: "reload" | "navigate", opener = false) => {
-      const runtime = createReplayRootRuntime({ documentRelease: "synthetic-build-A", getPolicy: () => policy,
+    const create = (type: "reload" | "navigate", opener = false, documentRelease = "synthetic-build-A") => {
+      const runtime = createReplayRootRuntime({ documentRelease, getPolicy: () => policy,
         subscribePolicy: () => () => {}, fetch: browserFetch, pipelineOptions: { record },
         loadPipeline: async () => ({ createReplayRecordingPipeline }), owners: createReplayDocumentOwners(), locks,
         monotonicNow: Date.now, handoff: createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: Date.now, epochNow: Date.now }),
@@ -115,6 +115,59 @@ describe("root runtime through real BFF and document-independent synthetic relay
     const opener = create("navigate", true); await capture(opener);
     expect(opener.getSnapshot().reference!.recordingId).not.toBe(reference.recordingId);
     await PostDB(db, schema, { replay_recording: [{ status: "open" }, { status: "open" }] });
+  }, 20_000);
+
+  it("registers a fresh build-B document through the real BFF without resuming its build-A handoff", async () => {
+    const { create, inspect, browserFetch } = await setup();
+    const original = create("navigate");
+    await capture(original);
+    const referenceA = original.getSnapshot().reference!;
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    expect(original.getSnapshot().continuity).toBe("handoff");
+    expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).not.toBeNull();
+    original.dispose(); epicReplayConsent.reset();
+    await vi.advanceTimersByTimeAsync(200);
+
+    // A new document receives its own public build identity. Even an otherwise
+    // eligible clean build-A frontier cannot authorize continuation under B.
+    const successor = create("reload", false, "synthetic-build-B");
+    const continuity: string[] = [];
+    successor.subscribe(() => continuity.push(successor.getSnapshot().continuity));
+    await capture(successor);
+    const referenceB = successor.getSnapshot().reference!;
+    expect(successor.getSnapshot()).toMatchObject({ status: "capturing", continuity: "new_recording",
+      snapshotReceived: true, evidence: "unverified" });
+    expect(continuity).not.toContain("resumed");
+    expect(referenceB.recordingId).not.toBe(referenceA.recordingId);
+    expect(referenceB.startedAt).toBeGreaterThan(referenceA.startedAt);
+    expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
+
+    const registrations = browserFetch.mock.calls
+      .filter(([path]) => String(path).endsWith("/recordings"))
+      .map(([, init]) => replayRegistrationRequestSchema.parse(JSON.parse(String(init?.body))));
+    expect(registrations).toHaveLength(2);
+    expect(registrations.map(({ release, startedAt, configVersion }) => ({ release, startedAt, configVersion }))).toEqual([
+      { release: "synthetic-build-A", startedAt: referenceA.startedAt, configVersion: "4" },
+      { release: "synthetic-build-B", startedAt: referenceB.startedAt, configVersion: "4" },
+    ]);
+    expect(registrations[1]!.idempotencyKey).not.toBe(registrations[0]!.idempotencyKey);
+
+    const state = await inspect();
+    expect(state.recordings).toHaveLength(2);
+    expect(state.recordings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ recordingId: referenceA.recordingId, startedAt: referenceA.startedAt,
+        release: "synthetic-build-A", nextSequence: 1, status: "open" }),
+      expect.objectContaining({ recordingId: referenceB.recordingId, startedAt: referenceB.startedAt,
+        release: "synthetic-build-B", nextSequence: 1, status: "open" }),
+    ]));
+    expect(state.calls).toMatchObject([
+      { recordingId: referenceA.recordingId, sequence: 0, types: [4, 2], status: 200, final: false },
+      { recordingId: referenceB.recordingId, sequence: 0, types: [4, 2], status: 200, final: false },
+    ]);
+    await PostDB(db, schema, { replay_recording: [
+      { recordingId: referenceA.recordingId, status: "open" },
+      { recordingId: referenceB.recordingId, status: "open" },
+    ] });
   }, 20_000);
 
   it.each(["advanced_cursor_next_retry", "close_next_append"])("rotates conservatively through the real BFF on %s", async (mode) => {

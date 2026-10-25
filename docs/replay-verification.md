@@ -116,9 +116,10 @@ these forms. Test offline/rejection, route exclusion and withdrawal independentl
 Repeat direct use inside the **actual existing Epic preview host** with its owner.
 A local iframe demonstrates only local framing and must be labeled separately;
 it cannot close the Epic-host acceptance item. This checkout does not create or
-modify a Builder destination. The central owner must supply/execute its actual v1
-batch schema against the emitted wire payload before claiming cross-contract
-acceptance. No second hand-written fake schema establishes that proof.
+modify a Builder destination. Cross-contract acceptance requires exercising the
+actual central v1 batch schema against the emitted BFF wire payload using a
+completed integration source explicitly authorized by the owning issue. No
+second hand-written fake schema establishes that proof.
 
 The automated tests use Vitest with one worker and `GOMAXPROCS=2`. Coverage spans
 the real pinned recorder's loading lifecycle, atomic batch packing, revalidation,
@@ -141,11 +142,14 @@ replace actual Epic-host or Cloud evidence.
 | Recovery debt survives remount, policy refresh, route reentry, repeated consent and reload | `lib/replay/tests/replay-root-runtime.test.ts` checks exhausted state/history, explicit restart and the healthy-progress threshold. |
 | Lost resume-registration ACK spends its one-shot handoff | `lib/replay/tests/replay-relay-lifecycle.test.ts` checks a budgeted fresh boundary and rejects a copied consumed candidate through the real BFF. |
 | Lost resumed-snapshot ACK retries the immutable batch | `lib/replay/tests/replay-relay-lifecycle.test.ts` and `replay-uploader.test.ts` check unchanged request bytes, a single accepted cursor advance, withheld resumed status and bounded retry exhaustion. |
+| A fresh build-B document rejects a clean build-A handoff and registers its own release | `lib/replay/tests/replay-relay-lifecycle.test.ts` checks distinct recording/start/key, sequence-zero snapshot acknowledgment, relay release metadata and persisted BFF rows. `replay-evidence-boundary.test.ts` separately keeps the loaded build-A document and frozen evidence unchanged after policy refresh to build-B. |
 
-The independent central `replayBatchSchema` must be supplied or exercised by its
-owning checkout. The local synthetic schema is not that evidence. Do not read
-another issue's unfinished worktree to close this item when the execution scope
-is restricted to this checkout.
+Keep the independent central `replayBatchSchema` check separate from the regular
+test suite so it does not acquire a dependency on an external checkout. Retain
+the approved source path, source SHA-256 and assertion results under
+`.agent-runs/`, without raw events or credentials. Schema acceptance does not
+establish deployed central behavior or Cloud playback. Do not read another
+issue's unfinished worktree to close this item.
 
 ## Cleanup
 
