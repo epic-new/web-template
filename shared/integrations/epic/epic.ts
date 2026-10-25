@@ -59,11 +59,13 @@ export class EpicClient {
   readonly projectId: string;
   readonly #baseUrl: string;
   readonly #token: string;
+  readonly #protectionBypass: string | null;
 
-  private constructor(baseUrl: string, projectId: string, token: string) {
+  private constructor(baseUrl: string, projectId: string, token: string, protectionBypass: string | null) {
     this.#baseUrl = baseUrl;
     this.projectId = projectId;
     this.#token = token;
+    this.#protectionBypass = protectionBypass;
   }
 
   static fromEnv(env: EpicEnv = process.env): EpicClient | null {
@@ -85,7 +87,18 @@ export class EpicClient {
       env.NODE_ENV !== "production";
     if (url.protocol !== "https:" && !isLocalHttp) return null;
 
-    return new EpicClient(url.origin, projectId, token);
+    // A protected Epic (staging behind Vercel Deployment Protection) answers
+    // every request with a login redirect unless it carries its bypass secret.
+    const bypass = env.EPIC_VERCEL_PROTECTION_BYPASS?.trim() || null;
+    return new EpicClient(url.origin, projectId, token, bypass);
+  }
+
+  #headers(extra: Record<string, string>): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.#token}`,
+      ...extra,
+      ...(this.#protectionBypass ? { "x-vercel-protection-bypass": this.#protectionBypass } : {}),
+    };
   }
 
   async request(path: string, { signal }: { signal?: AbortSignal } = {}): Promise<unknown> {
@@ -94,10 +107,7 @@ export class EpicClient {
     try {
       response = await fetch(`${this.#baseUrl}${path}`, {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.#token}`,
-          Accept: "application/json",
-        },
+        headers: this.#headers({ Accept: "application/json" }),
         cache: "no-store",
         // The bearer token must never follow a redirect to another host.
         redirect: "error",
@@ -123,7 +133,8 @@ export class EpicClient {
 
   /**
    * POSTs a JSON body as the publishing credential. Only Authorization,
-   * Content-Type and Accept are sent: nothing from the incoming request (cookies,
+   * Content-Type, Accept and, when configured, the protection bypass are
+   * sent: nothing from the incoming request (cookies,
    * origin, referrer, forwarding or User-Agent headers) can reach Epic.
    *
    * A non-2xx answer in Epic's flat error envelope becomes an
@@ -139,11 +150,7 @@ export class EpicClient {
     try {
       response = await fetch(`${this.#baseUrl}${path}`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.#token}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
+        headers: this.#headers({ "Content-Type": "application/json", Accept: "application/json" }),
         body: JSON.stringify(body),
         cache: "no-store",
         redirect: "error",

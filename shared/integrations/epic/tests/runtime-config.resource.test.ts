@@ -37,6 +37,23 @@ describe("RuntimeConfigResource", () => {
     expect(init?.cache).toBe("no-store");
   });
 
+  it("sends a protected Epic's bypass secret only when one is configured", async () => {
+    const upstream = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse(runtimeConfigFixture()));
+    vi.stubGlobal("fetch", upstream);
+    const signal = new AbortController().signal;
+
+    await RuntimeConfigResource.fetch(EpicClient.fromEnv(env)!, { signal });
+    await RuntimeConfigResource.fetch(
+      EpicClient.fromEnv({ ...env, EPIC_VERCEL_PROTECTION_BYPASS: "bypass-secret" })!,
+      { signal },
+    );
+
+    const bypassOf = (call: number) =>
+      new Headers(upstream.mock.calls[call][1]?.headers).get("x-vercel-protection-bypass");
+    expect(bypassOf(0)).toBeNull();
+    expect(bypassOf(1)).toBe("bypass-secret");
+  });
+
   it("normalizes upstream failures without leaking the credential", async () => {
     const client = EpicClient.fromEnv(env)!;
     const responses: Array<() => Promise<Response>> = [
