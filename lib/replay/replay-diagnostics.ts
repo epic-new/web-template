@@ -32,6 +32,8 @@ export interface ReplayDiagnosticsSettings {
 type AddCustomEvent = (tag: string, payload: unknown) => boolean;
 
 export const CONSOLE_TAG = "epic.console";
+/** Which streams are on, so a reader can tell "off" from "nothing happened". */
+export const DIAGNOSTICS_TAG = "epic.diagnostics";
 export const NETWORK_TAG = "epic.network";
 
 /** Per stream: at most this many events in a window, and this many in a page's life. */
@@ -206,7 +208,25 @@ export function createReplayDiagnostics(
     }
   }
 
+  let announced: string | null = null;
+
   return {
+    /**
+     * Records which streams are on into the recording, once per boundary and
+     * again whenever that changes. Outside the budgets: it is the context
+     * every other diagnostic is read against.
+     */
+    announce(boundary: number): void {
+      if (!started) return;
+      const settings = { console: active.console, network: active.network };
+      const key = `${boundary}:${settings.console}:${settings.network}`;
+      if (key === announced) return;
+      try {
+        if (add(DIAGNOSTICS_TAG, settings)) announced = key;
+      } catch {
+        // Best effort, like every diagnostic.
+      }
+    },
     /** Installs what the current policy allows. Idempotent. */
     start(): void {
       if (started || typeof window === "undefined") return;

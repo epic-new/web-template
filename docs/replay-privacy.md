@@ -177,10 +177,14 @@ Diagnostics), both off by default (`lib/replay/replay-diagnostics.ts`).
 - **Network:** `fetch` and `XMLHttpRequest`, as `epic.network`
   `{ method, url, status, durationMs }`. The URL is the path for this site (the
   origin only for another one), never the query or fragment, with id- and
-  token-like segments replaced by `:id`; headers and bodies are never read. `/api/epic/replay/*` and the framework's own requests
+  token-like segments replaced by `:id`; headers and bodies are never read.
+  `/api/epic/replay/*` and the framework's own requests
   (`/_next/`, `/__nextjs*`) are never recorded.
 - Events land only while the capture session records, so consent, route and
   expiry gates apply. Each stream is capped (20 events per 10 s, 300 per page).
+- Each recorded boundary carries `epic.diagnostics` `{ console, network }`,
+  again whenever a switch changes, so the Builder can say a stream was not
+  collected rather than show an empty panel as if nothing happened.
 - The wrappers call the page's original functions with the same arguments and
   return their results (a failed `fetch` stays rejected). Switching a stream
   off, or disposing the provider, restores the originals — unless another

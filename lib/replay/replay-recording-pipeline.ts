@@ -141,13 +141,18 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
         refresh();
       }));
       cleanups.push(session.subscribe(() => {
+        const capture = session.getState();
         // A recording whose capture stopped is finished: flush it and close it.
-        if (session.getState().status === "blocked") uploader.closeActive();
+        if (capture.status === "blocked") uploader.closeActive();
+        // The state turns "capturing" just before rrweb starts, inside the same call.
+        else queueMicrotask(() => diagnostics.announce(capture.boundary));
         refresh();
       }));
       // A stop that policy can lift resumes only on a different config version.
       cleanups.push(subscribePolicy(() => {
         diagnostics.sync();
+        const capture = session.getState();
+        if (capture.status === "capturing") diagnostics.announce(capture.boundary);
         if (stoppedAtConfig !== undefined && getPolicy().configVersion !== stoppedAtConfig) {
           stoppedAtConfig = undefined;
           session.start();

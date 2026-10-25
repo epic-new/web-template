@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   CONSOLE_TAG,
+  DIAGNOSTICS_TAG,
   createReplayDiagnostics,
   consoleMessage,
   diagnosticPath,
@@ -197,5 +198,24 @@ describe("replay diagnostics", () => {
     landing = true;
     console.warn("after consent");
     expect(landed).toHaveLength(1);
+  });
+
+  it("announces which streams are on once per boundary, and again when that changes", () => {
+    settings = { console: false, network: true };
+    const diagnostics = create();
+    diagnostics.start();
+
+    diagnostics.announce(1);
+    diagnostics.announce(1);
+    settings = { console: true, network: true };
+    diagnostics.sync();
+    diagnostics.announce(1);
+    diagnostics.announce(2);
+
+    expect(recorded.filter((entry) => entry.tag === DIAGNOSTICS_TAG).map((entry) => entry.payload)).toEqual([
+      { console: false, network: true },
+      { console: true, network: true },
+      { console: true, network: true },
+    ]);
   });
 });
