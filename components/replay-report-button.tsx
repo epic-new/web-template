@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { MessageSquareWarningIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,8 @@ import {
   type ReplayReportRequest,
   type ReplayUploadErrorCode,
 } from "@/lib/replay/replay-upload-contract";
+import { epicReplayConsent } from "@/lib/replay/replay-consent";
+import { chooseReplayConsent } from "@/lib/replay/replay-consent-choice";
 import { useEpicReplay } from "@/lib/replay/use-epic-replay";
 
 const COPY = {
@@ -39,6 +41,10 @@ const COPY = {
   close: "Close",
   thanks: "Thanks, your report was received.",
   reference: "Reference",
+  recordingOn: "Session recording is on.",
+  recordingOff: "Session recording is off.",
+  turnOff: "Turn off",
+  turnOn: "Turn on",
 } as const;
 
 const ERRORS: Partial<Record<ReplayUploadErrorCode, string>> = {
@@ -72,6 +78,7 @@ interface FrozenContext {
  */
 export function ReplayReportButton({ release }: { release: string | null }) {
   const replay = useEpicReplay();
+  const consent = useSyncExternalStore(epicReplayConsent.subscribe, epicReplayConsent.getSnapshot, () => "unknown" as const);
   const [open, setOpen] = useState(false);
   const [description, setDescription] = useState("");
   const [expected, setExpected] = useState("");
@@ -205,6 +212,20 @@ export function ReplayReportButton({ release }: { release: string | null }) {
                   onChange={(event) => setExpected(event.target.value)}
                 />
               </div>
+
+              {/* The one place a visitor who already chose can change their mind. */}
+              {replay.status !== "disabled" && consent !== "unknown" ? (
+                <p className="text-muted-foreground flex flex-wrap items-center gap-1 text-xs">
+                  {consent === "granted" ? COPY.recordingOn : COPY.recordingOff}
+                  <button
+                    type="button"
+                    className="text-foreground underline underline-offset-2"
+                    onClick={() => chooseReplayConsent(consent === "granted" ? "withdrawn" : "granted")}
+                  >
+                    {consent === "granted" ? COPY.turnOff : COPY.turnOn}
+                  </button>
+                </p>
+              ) : null}
 
               {errorMessage ? (
                 <p id="replay-report-error" role="alert" className="text-destructive text-sm">

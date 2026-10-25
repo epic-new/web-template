@@ -4,31 +4,13 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { epicReplayConsent } from "@/lib/replay/replay-consent";
+import { chooseReplayConsent, readReplayConsentChoice } from "@/lib/replay/replay-consent-choice";
 
 const COPY = {
   body: "This app records how its pages are used, with anything you type hidden, to help fix problems faster.",
   allow: "Allow",
   decline: "No thanks",
 };
-
-const STORAGE_KEY = "epic-replay-consent";
-
-function readStoredChoice(): "granted" | "withdrawn" | null {
-  try {
-    const value = window.localStorage.getItem(STORAGE_KEY);
-    return value === "granted" || value === "withdrawn" ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function storeChoice(choice: "granted" | "withdrawn") {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, choice);
-  } catch {
-    // Storage blocked: the choice holds for this page only.
-  }
-}
 
 /**
  * The template's default consent prompt for session replay: shown only while
@@ -45,18 +27,11 @@ export function ReplayConsentBanner() {
   );
 
   useEffect(() => {
-    const stored = readStoredChoice();
-    if (stored === "granted") epicReplayConsent.grant();
-    if (stored === "withdrawn") epicReplayConsent.withdraw();
+    const stored = readReplayConsentChoice();
+    if (stored) chooseReplayConsent(stored);
   }, []);
 
   if (consent !== "unknown") return null;
-
-  const choose = (choice: "granted" | "withdrawn") => {
-    storeChoice(choice);
-    if (choice === "granted") epicReplayConsent.grant();
-    else epicReplayConsent.withdraw();
-  };
 
   return (
     <div
@@ -67,10 +42,10 @@ export function ReplayConsentBanner() {
     >
       <p className="flex-1 text-muted-foreground">{COPY.body}</p>
       <div className="flex gap-2">
-        <Button size="sm" variant="ghost" onClick={() => choose("withdrawn")}>
+        <Button size="sm" variant="ghost" onClick={() => chooseReplayConsent("withdrawn")}>
           {COPY.decline}
         </Button>
-        <Button size="sm" onClick={() => choose("granted")}>
+        <Button size="sm" onClick={() => chooseReplayConsent("granted")}>
           {COPY.allow}
         </Button>
       </div>
