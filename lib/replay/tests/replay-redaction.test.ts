@@ -9,8 +9,22 @@ import {
   sanitizeNetworkDiagnostic,
   sanitizeReplayError,
   sanitizeReplayPayload,
+  sanitizeReplayText,
   sanitizeUrl,
 } from "../replay-redaction";
+
+it("scans long non-URL text and malformed CSS without superlinear stalls", () => {
+  const text = `${"a".repeat(200_000)} ${"/segment".repeat(2_000)} https://u:p@app.test/a?token=secret /one/two?api_key=secret2`;
+  const start = performance.now();
+  const result = sanitizeReplayText(text, Number.POSITIVE_INFINITY);
+  const malformed = `url(${" ".repeat(2_000)}`;
+  expect(sanitizeCssText(malformed)).toBe(malformed);
+  expect(performance.now() - start).toBeLessThan(500);
+  expect(result).not.toContain("secret");
+  expect(result).not.toContain("u:p@");
+  expect(result).toContain("https://app.test/a?token=%5Bredacted%5D");
+  expect(result).toContain("/one/two?api_key=%5Bredacted%5D");
+});
 
 describe("sanitizeUrl", () => {
   it("redacts the Epic preview token and fragment credentials", () => {

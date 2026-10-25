@@ -125,4 +125,29 @@ describe("createReplayRecordingPipeline", () => {
     expect(browser.log.length).toBe(before);
     pipeline.dispose();
   });
+
+  it("stops rrweb on terminal rejection while preserving the upload failure", async () => {
+    const { fixture, browser, fake, pipeline } = setup();
+    epicReplayConsent.grant();
+    pipeline.start();
+    await flush(5_000);
+    fixture.scriptBatchAnswers({
+      status: 403,
+      body: { contractVersion: 1, error: "Capture disabled", code: "capture_disabled" },
+    });
+    fake.emit();
+    await flush(5_000);
+    expect(pipeline.getState()).toMatchObject({
+      capture: { status: "blocked", reason: "transport_unavailable" },
+      upload: { status: "unavailable", reason: "capture_disabled", bufferedEvents: 0 },
+    });
+    const requests = browser.log.length;
+    fake.emit();
+    await flush(30_000);
+    expect(browser.log).toHaveLength(requests);
+    pipeline.start(); // Explicit user restart, distinct from automatic boundary rotation.
+    await flush(5_000);
+    expect(pipeline.getState().capture.status).toBe("capturing");
+    pipeline.dispose();
+  });
 });

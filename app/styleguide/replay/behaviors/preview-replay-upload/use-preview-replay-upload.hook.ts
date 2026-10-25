@@ -196,9 +196,21 @@ function build(): ReplayUploadHarnessSnapshot {
 }
 
 let snapshot = build();
+type ControlSnapshot = Pick<ReplayUploadHarnessSnapshot, 'target' | 'fixtureMode' | 'running' | 'policySource'>;
+let controlSnapshot: ControlSnapshot = {
+  target: snapshot.target, fixtureMode: snapshot.fixtureMode,
+  running: snapshot.running, policySource: snapshot.policySource,
+};
 
 function emit() {
   snapshot = build();
+  if (controlSnapshot.target !== snapshot.target || controlSnapshot.fixtureMode !== snapshot.fixtureMode ||
+      controlSnapshot.running !== snapshot.running || controlSnapshot.policySource !== snapshot.policySource) {
+    controlSnapshot = {
+      target: snapshot.target, fixtureMode: snapshot.fixtureMode,
+      running: snapshot.running, policySource: snapshot.policySource,
+    };
+  }
   for (const listener of [...listeners]) listener();
 }
 
@@ -324,7 +336,7 @@ let disposeTimer: ReturnType<typeof setTimeout> | undefined;
  * components inside `data-private` may render its counters: it re-renders on
  * every admitted event.
  */
-export function usePreviewReplayUpload() {
+function useHarnessLifetime() {
   useEffect(() => {
     mounted++;
     clearTimeout(disposeTimer);
@@ -339,18 +351,35 @@ export function usePreviewReplayUpload() {
       }, 0);
     };
   }, []);
+}
 
-  const state = useSyncExternalStore(subscribe, () => snapshot, () => snapshot);
-
+function useControls() {
   return {
-    state,
-    log: state.log,
     setTarget: useCallback((next: ReplayUploadTarget) => setTarget(next), []),
     setFixtureMode: useCallback((mode: SyntheticFixtureMode) => setFixtureMode(mode), []),
     start: useCallback(() => start(), []),
     stop: useCallback(() => stop(), []),
     emitCustomEvent: useCallback(() => emitCustomEvent(), []),
     sendForgedRequests: useCallback(() => sendForgedRequests(), []),
+  };
+}
+
+/** Control components do not subscribe to per-event buffer/readout changes. */
+export function usePreviewReplayUploadControls() {
+  useHarnessLifetime();
+  const state = useSyncExternalStore(subscribe, () => controlSnapshot, () => controlSnapshot);
+  return { state, ...useControls() };
+}
+
+export function usePreviewReplayUpload() {
+  useHarnessLifetime();
+
+  const state = useSyncExternalStore(subscribe, () => snapshot, () => snapshot);
+
+  return {
+    state,
+    log: state.log,
+    ...useControls(),
   };
 }
 

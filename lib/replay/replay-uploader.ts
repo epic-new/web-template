@@ -373,6 +373,7 @@ export function createReplayUploader({
     rec.queue = [];
     rec.queueBytes = 0;
     rec.inflight = null;
+    rec.token = null;
     rec.abortController?.abort();
     clearTimeout(rec.retryTimer);
     rec.retryTimer = undefined;
@@ -762,6 +763,7 @@ export function createReplayUploader({
     if (batch.body.final) {
       rec.outcome = "closed";
       rec.phase = "ended";
+      rec.token = null;
       rec.reason = null;
       recordHistory(rec);
       closing = closing.filter((other) => other !== rec);
@@ -869,6 +871,11 @@ export function createReplayUploader({
     /** Stops for good (e.g. the restart budget is spent); state stays as it is. */
     halt(): void {
       halted = true;
+    },
+
+    /** Only an explicit pipeline restart releases its exhausted recovery budget. */
+    resume(): void {
+      halted = false;
     },
 
     dispose(): void {

@@ -17,6 +17,7 @@ const hook = vi.hoisted(() => ({
 
 vi.mock("../../behaviors/preview-replay-upload/use-preview-replay-upload.hook", () => ({
   usePreviewReplayUpload: () => ({ ...hook, log: hook.state.log }),
+  usePreviewReplayUploadControls: () => hook,
 }));
 
 import { ReplayUploadHarness } from "../ReplayUploadHarness";
@@ -97,6 +98,8 @@ describe("ReplayUploadHarness", { timeout: 30_000 }, () => {
     expect(screen.getByLabelText("Request log")).toHaveTextContent("(types 4, 2...)");
     // The readout blocks its own capture.
     expect(screen.getByLabelText("Upload status").closest("[data-private]")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Start recording" }).closest("[data-private]")).not.toBeNull();
+    expect(screen.getByLabelText("Harness input").closest("[data-private]")).toBeNull();
   });
 
   it("keeps a withdrawn recording's reference in history and lists forged rejections", () => {

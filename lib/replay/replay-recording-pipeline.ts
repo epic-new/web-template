@@ -54,6 +54,7 @@ export function createReplayRecordingPipeline({
   let restarts = 0;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let pagehideAttached = false;
+  let started = false;
 
   const uploader = createReplayUploader({
     ...uploaderOptions,
@@ -92,14 +93,28 @@ export function createReplayRecordingPipeline({
     for (const listener of [...listeners]) listener();
   }
   session.subscribe(changed);
-  uploader.subscribe(changed);
+  uploader.subscribe(() => {
+    if (uploader.getState().status === "unavailable" && restartTimer === undefined) {
+      started = false;
+      // The upload outcome/history remains visible; stopping rrweb must not
+      // turn a terminal rejection into an apparently idle transport.
+      session.dispose("transport_unavailable");
+      if (pagehideAttached && typeof window !== "undefined") window.removeEventListener("pagehide", onPageHide);
+      pagehideAttached = false;
+    }
+    changed();
+  });
 
   const onPageHide = () => uploader.flushOnPageHide();
 
   return {
     start(): void {
+      if (started) return;
+      started = true;
+      restarts = 0;
+      uploader.resume();
       session.start();
-      if (!pagehideAttached && typeof window !== "undefined") {
+      if (started && !pagehideAttached && typeof window !== "undefined") {
         window.addEventListener("pagehide", onPageHide);
         pagehideAttached = true;
       }
@@ -108,6 +123,7 @@ export function createReplayRecordingPipeline({
 
     /** Stops capture and drops queued local data; history and the restart budget stay. */
     stop(): void {
+      started = false;
       clearTimeout(restartTimer);
       restartTimer = undefined;
       session.dispose();

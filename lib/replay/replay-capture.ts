@@ -41,7 +41,7 @@ type RecordFn = typeof rrwebRecord;
 
 export interface ReplayCaptureState {
   status: "capturing" | "blocked";
-  reason: ReplayBlockReason | null;
+  reason: ReplayBlockReason | "transport_unavailable" | null;
   boundary: number;
 }
 
@@ -277,14 +277,14 @@ export function createReplayCaptureSession({
       evaluate();
     },
 
-    dispose(): void {
+    dispose(reason?: "transport_unavailable"): void {
       if (!started) return;
       started = false;
       clearTimeout(pendingStart);
       pendingStart = undefined;
       stopRecorder();
       for (const cleanup of cleanups.splice(0).reverse()) cleanup();
-      setState({ status: "blocked", reason: state.reason ?? "policy_disabled", boundary: state.boundary });
+      setState({ status: "blocked", reason: reason ?? state.reason ?? "policy_disabled", boundary: state.boundary });
     },
 
     getState(): ReplayCaptureState {

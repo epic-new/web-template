@@ -108,14 +108,17 @@ export function sanitizeUrl(input: string): string {
 
 // URLs embedded in free text: absolute, protocol-relative, or a path with a query.
 // Parentheses end a URL so a CSS `url(...)` keeps its closing paren.
-const URL_IN_TEXT = /(?:[a-z][a-z\d+.-]*:)?\/\/[^\s"'<>`()]+|\/[^\s"'<>`?()]*\?[^\s"'<>`()]+/gi;
+// Match the authority without rescanning a possible scheme at every letter.
+// For relative paths only the final segment needs query redaction; excluding
+// slashes from that prefix also keeps long non-URL paths linear to scan.
+const URL_IN_TEXT = /\/\/[^\s"'<>`()]+|\/[^\s"'<>`?()/]*\?[^\s"'<>`()]+/gi;
 
 export function sanitizeReplayText(text: string, maxLength: number = REPLAY_PAYLOAD_LIMITS.maxStringLength): string {
   const sanitized = text.replace(URL_IN_TEXT, (url) => sanitizeUrl(url));
   return sanitized.length > maxLength ? sanitized.slice(0, maxLength) + TRUNCATED_SUFFIX : sanitized;
 }
 
-const CSS_URL = /url\(\s*(['"]?)([^'")]*)\1\s*\)/gi;
+const CSS_URL = /url\(\s*(?:(['"])([^'")]*)\1|([^'")\s]+))\s*\)/gi;
 const CSS_IMPORT = /@import\s+(['"])([^'"]*)\1/gi;
 // A `name=value` pair after `?`, `&`, `#` or `;` anywhere in the text, so a
 // credential survives neither a relative CSS URL nor a CSS escape.
@@ -129,7 +132,8 @@ const PAIR_IN_TEXT = /([?&#;])([^=&#?;\s"'()<>`\\]+)=([^&#;\s"'()<>`\\]*)/g;
 export function sanitizeCssText(css: string): string {
   return sanitizeReplayText(
     css
-      .replace(CSS_URL, (_, quote: string, url: string) => `url(${quote}${sanitizeUrl(url.trim())}${quote})`)
+      .replace(CSS_URL, (_, quote: string | undefined, quoted: string | undefined, unquoted: string | undefined) =>
+        `url(${quote ?? ""}${sanitizeUrl((quoted ?? unquoted ?? "").trim())}${quote ?? ""})`)
       .replace(CSS_IMPORT, (_, quote: string, url: string) => `@import ${quote}${sanitizeUrl(url)}${quote}`),
     Number.POSITIVE_INFINITY,
   ).replace(PAIR_IN_TEXT, (pair, lead: string, name: string) =>

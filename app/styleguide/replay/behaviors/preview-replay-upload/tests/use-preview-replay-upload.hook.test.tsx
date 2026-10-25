@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/headers", () => ({ headers: vi.fn(), cookies: vi.fn() }));
@@ -11,7 +11,7 @@ import { epicReplayConsent } from "@/lib/replay/replay-consent";
 import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
 import { clearEpicEnv } from "@/lib/replay/tests/runtime-config.fixture";
 import { replayRequest, routeParams, signUp } from "@/lib/replay/tests/replay-route.fixture";
-import { resetPreviewReplayUpload, usePreviewReplayUpload } from "../use-preview-replay-upload.hook";
+import { resetPreviewReplayUpload, usePreviewReplayUpload, usePreviewReplayUploadControls } from "../use-preview-replay-upload.hook";
 
 async function settle(ms = 0) {
   await act(async () => {
@@ -29,6 +29,7 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
   });
 
   afterEach(() => {
+    cleanup();
     resetPreviewReplayUpload();
     epicReplayConsent.reset();
     replayLifecycle.reset();
@@ -57,7 +58,7 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
 
     expect(result.current.state.pipeline.upload).toMatchObject({ status: "pending", evidence: "unverified" });
     const log = result.current.log;
-    expect(log[0]).toMatchObject({ path: "/recordings", status: 201 });
+    expect(log.find((entry) => entry.path === "/recordings")).toMatchObject({ path: "/recordings", status: 201 });
     const batches = log.filter((entry) => entry.path.endsWith("/batches"));
     expect(batches.map((entry) => entry.sequence)).toEqual([0, 1]);
     expect(batches[0]!.firstEventTypes).toEqual([4, 2]);
@@ -72,6 +73,7 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
     clearEpicEnv();
     await PreDB(db, schema, { user: [], account: [], session: [], replay_recording: [], replay_rate_limit: [] });
     const { cookie } = await signUp("user1@example.com");
+    const { POST: identity } = await import("@/app/api/epic/replay/identity/route");
     const { POST: register } = await import("@/app/api/epic/replay/recordings/route");
     const { POST: renew } = await import("@/app/api/epic/replay/recordings/[recordingId]/capability/route");
     const { POST: upload } = await import("@/app/api/epic/replay/recordings/[recordingId]/batches/route");
@@ -81,6 +83,7 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input).replace("/api/epic/replay", "");
         const request = replayRequest(path, { body: init?.body as string, cookie });
+        if (path === "/identity") return identity(request);
         const match = /^\/recordings\/([^/]+)\/(capability|batches)$/.exec(path);
         if (!match) return register(request);
         return match[2] === "capability" ? renew(request, routeParams(match[1]!)) : upload(request, routeParams(match[1]!));
@@ -107,5 +110,28 @@ describe("usePreviewReplayUpload", { timeout: 30_000 }, () => {
       [503, "not_configured"],
       [503, "not_configured"],
     ]);
+  });
+
+  it("keeps the control snapshot stable while the real recorder emits events", async () => {
+    window.history.replaceState({}, "", "/styleguide/replay/upload");
+    let controlsRenders = 0;
+    const controls = renderHook(() => { controlsRenders++; return usePreviewReplayUploadControls(); });
+    const readout = renderHook(() => usePreviewReplayUpload());
+    act(() => {
+      controls.result.current.setTarget("synthetic");
+      epicReplayConsent.grant();
+      controls.result.current.start();
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const before = controlsRenders;
+    const controlSnapshot = controls.result.current.state;
+    const beforeReadout = readout.result.current.state;
+    act(() => {
+      for (let i = 0; i < 20; i++) controls.result.current.emitCustomEvent();
+    });
+    expect(readout.result.current.state).not.toBe(beforeReadout);
+    expect(readout.result.current.state.pipeline.upload.bufferedEvents).toBeGreaterThan(0);
+    expect(controls.result.current.state).toBe(controlSnapshot);
+    expect(controlsRenders).toBe(before);
   });
 });

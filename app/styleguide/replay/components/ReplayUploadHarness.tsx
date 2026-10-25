@@ -16,7 +16,7 @@ import {
   type SyntheticFixtureMode,
 } from '../behaviors/preview-replay-upload/synthetic-epi210'
 import {
-  usePreviewReplayUpload,
+  usePreviewReplayUploadControls,
   type ReplayUploadTarget,
 } from '../behaviors/preview-replay-upload/use-preview-replay-upload.hook'
 import { ReplayUploadReadout } from './ReplayUploadReadout'
@@ -43,7 +43,7 @@ const TARGETS: { value: ReplayUploadTarget; label: string; description: string }
  * synthetic fixture. Nothing here is evidence that a recording is playable.
  */
 export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'second' }) {
-  const { state, setTarget, setFixtureMode, start, stop, emitCustomEvent, sendForgedRequests } = usePreviewReplayUpload()
+  const { state, setTarget, setFixtureMode, start, stop, emitCustomEvent, sendForgedRequests } = usePreviewReplayUploadControls()
   const { consent, grant, withdraw, notice } = useManageReplayConsent()
   const synthetic = state.target === 'synthetic'
 
@@ -57,7 +57,7 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
         </p>
       </div>
 
-      <Card>
+      <Card data-private>
         <CardHeader>
           <CardTitle>Target</CardTitle>
           <CardDescription>Where the upload transport sends its requests.</CardDescription>
@@ -108,7 +108,7 @@ export function ReplayUploadHarness({ page = 'first' }: { page?: 'first' | 'seco
         </CardContent>
       </Card>
 
-      <Card>
+      <Card data-private>
         <CardHeader>
           <CardTitle>Recording</CardTitle>
           <CardDescription>Capture starts only when the policy, consent, route and sample all allow it.</CardDescription>
