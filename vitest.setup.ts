@@ -15,6 +15,7 @@ import { db } from "@/db";
 import * as schema from "@/db/schema";
 import { ReadReplayConfig } from "@/app/api/epic/replay/config/behaviors/read-replay-config/read-replay-config.service";
 import { ReplayRateLimitModel } from "@/shared/models/replay-rate-limit";
+import { clearTelemetryRateLimits } from "@/lib/replay/server/telemetry-rate-limit";
 
 // Mock server-only package (used by Next.js server actions)
 vi.mock("server-only", () => ({}));
@@ -68,4 +69,5 @@ beforeEach(async () => {
   // The replay relay caches rows and Epic answers in process memory; they must not outlive a test.
   ReadReplayConfig.resetCache();
   ReplayRateLimitModel.clearPruneClock();
+  clearTelemetryRateLimits();
 });
