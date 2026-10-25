@@ -169,15 +169,18 @@ Console and network context are separate policy switches (Recording settings →
 Diagnostics), both off by default (`lib/replay/replay-diagnostics.ts`).
 
 - **Console:** `console.warn` and `console.error` only, as `epic.console`
-  `{ level, message }`; the message goes through the payload redaction and is
+  `{ level, message }`. Logged objects go through the payload redaction first
+  (sensitive keys lose their values); the text then loses addresses, JWTs,
+  auth headers, provider keys, `password=…` pairs and long hex secrets, and is
   cut at 500 characters.
 - **Network:** `fetch` and `XMLHttpRequest`, as `epic.network`
   `{ method, url, status, durationMs }`. The URL is the path for this site (the
-  origin only for another one), never the query or fragment; headers and
-  bodies are never read. `/api/epic/replay/*` and the framework's own requests
+  origin only for another one), never the query or fragment, with id- and
+  token-like segments replaced by `:id`; headers and bodies are never read. `/api/epic/replay/*` and the framework's own requests
   (`/_next/`, `/__nextjs*`) are never recorded.
 - Events land only while the capture session records, so consent, route and
   expiry gates apply. Each stream is capped (20 events per 10 s, 300 per page).
 - The wrappers call the page's original functions with the same arguments and
-  return their results; switching a stream off, or disposing the provider,
-  restores the originals.
+  return their results (a failed `fetch` stays rejected). Switching a stream
+  off, or disposing the provider, restores the originals — unless another
+  library patched on top, in which case ours is left in place, inert.

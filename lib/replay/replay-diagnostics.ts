@@ -1,4 +1,10 @@
-import { isReplayDiagnosticUrlAllowed, redactSecrets, sanitizeNetworkDiagnostic, sanitizeReplayText } from "./replay-redaction";
+import {
+  isReplayDiagnosticUrlAllowed,
+  redactSecrets,
+  sanitizeNetworkDiagnostic,
+  sanitizeReplayPayload,
+  sanitizeReplayText,
+} from "./replay-redaction";
 
 /**
  * Optional console and network context, recorded as rrweb custom events
@@ -40,7 +46,6 @@ const CONSOLE_LEVELS = ["warn", "error"] as const;
 
 /** The framework's own traffic (dev overlay, HMR, assets) says nothing about the app. */
 const FRAMEWORK_PATHS = ["/__nextjs", "/_next/"] as const;
-type ConsoleLevel = (typeof CONSOLE_LEVELS)[number];
 
 export function createReplayDiagnostics(
   add: AddCustomEvent,
@@ -49,6 +54,9 @@ export function createReplayDiagnostics(
 ) {
   let started = false;
   let emitting = false;
+  // Wrappers check these, so one left in another library's chain after we
+  // restore (we never undo a later patch) goes inert instead of recording.
+  const active = { console: false, network: false };
   let uninstallConsole: (() => void) | null = null;
   let uninstallNetwork: (() => void) | null = null;
   const budgets = { console: budget(), network: budget() };
@@ -57,25 +65,29 @@ export function createReplayDiagnostics(
     return { total: 0, windowStart: 0, inWindow: 0 };
   }
 
-  function allowed(stream: keyof typeof budgets): boolean {
+  function hasBudget(stream: keyof typeof budgets): boolean {
     const b = budgets[stream];
     const at = now();
-    if (at - b.windowStart >= REPLAY_DIAGNOSTIC_LIMITS.windowMs) {
+    if (at - b.windowStart >= REPLAY_DIAGNOSTIC_LIMITS.windowMs || at < b.windowStart) {
       b.windowStart = at;
       b.inWindow = 0;
     }
-    if (b.total >= REPLAY_DIAGNOSTIC_LIMITS.perPage || b.inWindow >= REPLAY_DIAGNOSTIC_LIMITS.burst) return false;
-    b.total += 1;
-    b.inWindow += 1;
-    return true;
+    return b.total < REPLAY_DIAGNOSTIC_LIMITS.perPage && b.inWindow < REPLAY_DIAGNOSTIC_LIMITS.burst;
   }
 
-  // Recording a diagnostic must never produce another one (or throw into the page).
-  function emit(stream: keyof typeof budgets, tag: string, payload: unknown) {
-    if (emitting || !allowed(stream)) return;
+  /**
+   * Records one diagnostic, building its payload only when the stream may
+   * still record, and spending budget only on what actually landed (nothing
+   * lands before consent). Never produces another diagnostic, never throws.
+   */
+  function emit(stream: keyof typeof budgets, tag: string, payload: () => unknown) {
+    if (emitting || !active[stream] || !hasBudget(stream)) return;
     emitting = true;
     try {
-      add(tag, payload);
+      if (add(tag, payload())) {
+        budgets[stream].total += 1;
+        budgets[stream].inWindow += 1;
+      }
     } catch {
       // Diagnostics are best effort.
     } finally {
@@ -83,19 +95,25 @@ export function createReplayDiagnostics(
     }
   }
 
+  /** Puts `original` back only while ours is still the installed function. */
+  function restoreIfOurs<T>(read: () => T, ours: T, write: (value: T) => void, original: T) {
+    if (read() === ours) write(original);
+  }
+
   function installConsole(): () => void {
-    const originals = new Map<ConsoleLevel, (...args: unknown[]) => void>();
+    const restores: (() => void)[] = [];
     for (const level of CONSOLE_LEVELS) {
       const original = console[level];
-      originals.set(level, original);
       const wrapper = function (this: unknown, ...args: unknown[]) {
-        if (!emitting) emit("console", CONSOLE_TAG, { level, message: consoleMessage(args) });
+        // `emit` builds the message inside its own try, so nothing here can throw before the page's call.
+        emit("console", CONSOLE_TAG, () => ({ level, message: consoleMessage(args) }));
         return original.apply(this, args);
       };
       console[level] = wrapper;
+      restores.push(() => restoreIfOurs(() => console[level], wrapper, (value) => (console[level] = value), original));
     }
     return () => {
-      for (const [level, original] of originals) console[level] = original;
+      for (const restore of restores) restore();
     };
   }
 
@@ -104,20 +122,24 @@ export function createReplayDiagnostics(
 
     if (typeof window.fetch === "function") {
       const originalFetch = window.fetch;
-      window.fetch = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      const wrapper = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
         const startedAt = performance.now();
         const method = (init?.method ?? (input instanceof Request ? input.method : "GET")) || "GET";
         const url = input instanceof Request ? input.url : String(input);
-        const result = originalFetch.call(this, input, init);
-        result.then(
-          (response) => recordRequest(method, url, response.status, performance.now() - startedAt),
-          () => recordRequest(method, url, 0, performance.now() - startedAt),
+        // Re-thrown on failure, so a fetch the page leaves unhandled still reaches `unhandledrejection`.
+        return originalFetch.call(this, input, init).then(
+          (response) => {
+            recordRequest(method, url, response.status, performance.now() - startedAt);
+            return response;
+          },
+          (error: unknown) => {
+            recordRequest(method, url, 0, performance.now() - startedAt);
+            throw error;
+          },
         );
-        return result;
       } as typeof window.fetch;
-      restores.push(() => {
-        window.fetch = originalFetch;
-      });
+      window.fetch = wrapper;
+      restores.push(() => restoreIfOurs(() => window.fetch, wrapper, (value) => (window.fetch = value), originalFetch));
     }
 
     if (typeof XMLHttpRequest !== "undefined") {
@@ -125,11 +147,12 @@ export function createReplayDiagnostics(
       const originalOpen = proto.open;
       const originalSend = proto.send;
       const meta = new WeakMap<XMLHttpRequest, { method: string; url: string }>();
-      proto.open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
+      const open = function (this: XMLHttpRequest, method: string, url: string | URL, ...rest: unknown[]) {
+        const result = (originalOpen as (...args: unknown[]) => void).call(this, method, url, ...rest);
         meta.set(this, { method, url: String(url) });
-        return (originalOpen as (...args: unknown[]) => void).call(this, method, url, ...rest);
+        return result;
       } as typeof proto.open;
-      proto.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
+      const send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
         const request = meta.get(this);
         if (request) {
           const startedAt = performance.now();
@@ -141,9 +164,11 @@ export function createReplayDiagnostics(
         }
         return originalSend.call(this, body);
       };
+      proto.open = open;
+      proto.send = send;
       restores.push(() => {
-        proto.open = originalOpen;
-        proto.send = originalSend;
+        restoreIfOurs(() => proto.open, open, (value) => (proto.open = value), originalOpen);
+        restoreIfOurs(() => proto.send, send, (value) => (proto.send = value), originalSend);
       });
     }
 
@@ -154,11 +179,11 @@ export function createReplayDiagnostics(
 
   function recordRequest(method: string, url: string, status: number, durationMs: number) {
     try {
-      const path = diagnosticPath(url);
-      if (!path || !isReplayDiagnosticUrlAllowed(path)) return;
-      if (FRAMEWORK_PATHS.some((prefix) => path.startsWith(prefix))) return;
-      const entry = sanitizeNetworkDiagnostic({ method, url: path, status, durationMs });
-      if (entry) emit("network", NETWORK_TAG, entry);
+      const raw = diagnosticPath(url);
+      if (!raw || !isReplayDiagnosticUrlAllowed(raw)) return;
+      if (FRAMEWORK_PATHS.some((prefix) => raw.startsWith(prefix))) return;
+      const path = redactPath(raw);
+      emit("network", NETWORK_TAG, () => sanitizeNetworkDiagnostic({ method, url: path, status, durationMs }));
     } catch {
       // A URL the page could fetch but we cannot parse is simply not recorded.
     }
@@ -167,6 +192,8 @@ export function createReplayDiagnostics(
   function sync() {
     if (!started) return;
     const settings = getSettings();
+    active.console = settings.console;
+    active.network = settings.network;
     if (settings.console && !uninstallConsole) uninstallConsole = installConsole();
     if (!settings.console && uninstallConsole) {
       uninstallConsole();
@@ -188,10 +215,12 @@ export function createReplayDiagnostics(
     },
     /** Re-reads the policy: installs a stream switched on, removes one switched off. */
     sync,
-    /** Removes every wrapper, restoring the page's own console and network functions. */
+    /** Removes every wrapper still installed, restoring the page's own console and network functions. */
     stop(): void {
       if (!started) return;
       started = false;
+      active.console = false;
+      active.network = false;
       uninstallConsole?.();
       uninstallNetwork?.();
       uninstallConsole = null;
@@ -202,20 +231,50 @@ export function createReplayDiagnostics(
 
 export type ReplayDiagnostics = ReturnType<typeof createReplayDiagnostics>;
 
-/** The bounded, redacted text of a console call's arguments. */
+/** Each argument and the joined text are cut before any pattern runs over them. */
+const ARGUMENT_CHARS = 2_000;
+const JOINED_CHARS = 4_000;
+
+/** The bounded, redacted text of a console call's arguments. Never throws. */
 export function consoleMessage(args: unknown[]): string {
   const text = args
     .map((arg) => {
-      if (typeof arg === "string") return arg;
-      if (arg instanceof Error) return `${arg.name}: ${arg.message}`;
       try {
-        return JSON.stringify(arg) ?? String(arg);
+        if (typeof arg === "string") return arg.slice(0, ARGUMENT_CHARS);
+        if (arg instanceof Error) return `${arg.name}: ${String(arg.message)}`.slice(0, ARGUMENT_CHARS);
+        // Objects go through the payload redaction first, so `{ password: … }` loses its value by key.
+        return (JSON.stringify(sanitizeReplayPayload(arg)) ?? "").slice(0, ARGUMENT_CHARS);
       } catch {
-        return String(arg);
+        return "[unserializable]";
       }
     })
-    .join(" ");
+    .join(" ")
+    .slice(0, JOINED_CHARS);
   return sanitizeReplayText(redactSecrets(text), REPLAY_DIAGNOSTIC_LIMITS.maxMessageLength);
+}
+
+const ID_SEGMENT = /^(?:\d{4,}|[0-9a-f]{16,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{24,})$/i;
+
+/**
+ * A path with the segments that tend to be secrets or identifiers (long ids,
+ * hex, UUIDs, tokens, addresses, `;matrix` params) replaced by `:id`, so
+ * `/invite/<token>` records as `/invite/:id`.
+ */
+export function redactPath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => {
+      const bare = segment.split(";")[0] ?? "";
+      let decoded = bare;
+      try {
+        decoded = decodeURIComponent(bare);
+      } catch {
+        // Keep the raw segment.
+      }
+      if (decoded.includes("@") || ID_SEGMENT.test(decoded)) return ":id";
+      return bare;
+    })
+    .join("/");
 }
 
 /**

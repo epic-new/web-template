@@ -6,6 +6,7 @@ import {
   createReplayDiagnostics,
   consoleMessage,
   diagnosticPath,
+  redactPath,
   NETWORK_TAG,
   REPLAY_DIAGNOSTIC_LIMITS,
   type ReplayDiagnosticsSettings,
@@ -129,5 +130,72 @@ describe("replay diagnostics", () => {
 
     expect(message).not.toMatch(/ana@example\.com|abcdefghijklmnop|eyJhbGci|0123456789abcdef0123/);
     expect(message).toContain("[redacted-email]");
+  });
+
+  it("replaces id- and token-like path segments", () => {
+    expect(redactPath("/invite/9f8e7d6c5b4a39281706f5e4d3c2b1a0/accept")).toBe("/invite/:id/accept");
+    expect(redactPath("/orders/123456/items")).toBe("/orders/:id/items");
+    expect(redactPath("/users/ana%40example.com")).toBe("/users/:id");
+    expect(redactPath("/files/550e8400-e29b-41d4-a716-446655440000;jsessionid=abc")).toBe("/files/:id");
+    expect(redactPath("/api/orders")).toBe("/api/orders");
+  });
+
+  it("drops secret values from logged objects by key", () => {
+    const message = consoleMessage(["failed", { password: "hunter2", token: "abc", sku: "A1" }]);
+    expect(message).not.toMatch(/hunter2|"abc"/);
+    expect(message).toContain('"sku":"A1"');
+    expect(consoleMessage(["password=hunter2 next"])).not.toContain("hunter2");
+  });
+
+  it("still calls the page's console when an argument cannot be read", () => {
+    settings = { console: true, network: false };
+    create().start();
+    const hostile = { get message() { throw new Error("boom"); }, toJSON() { throw new Error("boom"); } };
+
+    expect(() => console.warn(hostile)).not.toThrow();
+    expect(pageWarn.mock.calls[0]?.[0]).toBe(hostile);
+  });
+
+  it("leaves a failed fetch rejected, so the page still sees it", async () => {
+    settings = { console: false, network: true };
+    pageFetch.mockImplementationOnce(async () => {
+      throw new TypeError("offline");
+    });
+    create().start();
+
+    await expect(window.fetch("/api/orders")).rejects.toThrow("offline");
+  });
+
+  it("never undoes a patch installed after ours, and goes inert inside it", () => {
+    settings = { console: true, network: false };
+    const diagnostics = create();
+    diagnostics.start();
+    const ours = console.warn;
+    const later = (...args: unknown[]) => ours(...args);
+    console.warn = later as typeof console.warn;
+
+    diagnostics.stop();
+    expect(console.warn).toBe(later);
+    console.warn("after stop");
+    expect(recorded).toEqual([]);
+  });
+
+  it("spends no budget on events that did not land", () => {
+    settings = { console: true, network: false };
+    let landing = false;
+    const landed: unknown[] = [];
+    const diagnostics = createReplayDiagnostics(
+      (_tag, payload) => {
+        if (landing) landed.push(payload);
+        return landing;
+      },
+      () => settings,
+    );
+    diagnostics.start();
+
+    for (let i = 0; i < 50; i++) console.warn(`before consent ${i}`);
+    landing = true;
+    console.warn("after consent");
+    expect(landed).toHaveLength(1);
   });
 });
