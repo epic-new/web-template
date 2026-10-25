@@ -93,7 +93,10 @@ recording that is already sampled in.
   diffs, a stylesheet's `_cssText`, `insertRule`/`replace`/`replaceSync`,
   `setProperty`, adopted stylesheets): credential values inside `url(...)`,
   `@import` and any `?name=value` pair are redacted with the same list, and
-  the rules keep their structure. A CSS or URL field of an unexpected shape is
+  the rules keep their structure. Raw CSSOM resource URLs or URL function names
+  containing CSS escapes are replaced with a safe placeholder, including hex
+  escapes and escaped delimiters; those assets are omitted from replay. Ordinary
+  escaped selectors (including Tailwind selectors) remain unchanged. A CSS or URL field of an unexpected shape is
   dropped rather than recorded. Embedded frame sources (`rr_src`) are
   sanitized as URLs.
 - **Payloads** of custom and plugin events: keys that look like credentials are

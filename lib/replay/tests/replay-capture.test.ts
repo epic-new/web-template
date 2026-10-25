@@ -208,6 +208,7 @@ describe("createReplayCaptureSession", () => {
       session.start();
 
       sheet.insertRule(".b { background: url(/b.png?sig=synthetic-insert); }", 0);
+      sheet.insertRule(String.raw`.escaped { background: url("/a?\000074 oken=synthetic-css-escape"); }`, 0);
       (sheet.cssRules[1] as CSSStyleRule).style.setProperty("background-image", "url(/c.png?jwt=synthetic-setproperty)");
       (document.getElementById("styled") as HTMLElement).style.setProperty(
         "background-image",
@@ -228,6 +229,8 @@ describe("createReplayCaptureSession", () => {
       expect(sources).toContain(IncrementalSource.StyleSheetRule);
       const stored = json();
       expect(stored).not.toMatch(/synthetic-(csstext|insert|setproperty|diff|rrsrc|adopted)/);
+      expect(stored).not.toContain("synthetic-css-escape");
+      expect(stored).toContain(".escaped");
       expect(stored).toContain("%5Bredacted%5D");
       expect(getComputedStyle(document.getElementById("styled")!).color).toBe("rgb(255, 0, 0)");
       document.head.innerHTML = "";

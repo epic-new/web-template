@@ -120,8 +120,56 @@ export function sanitizeReplayText(text: string, maxLength: number = REPLAY_PAYL
 
 const CSS_URL = /url\(\s*(?:(['"])([^'")]*)\1|([^'")\s]+))\s*\)/gi;
 const CSS_IMPORT = /@import\s+(['"])([^'"]*)\1/gi;
+const CSS_IDENTIFIER = /(?:[a-z\d_-]|\\(?:[\da-f]{1,6}[ \t\r\n\f]?|[\s\S]))+/gi;
+const CSS_ESCAPE = /\\([\da-f]{1,6})[ \t\r\n\f]?|\\([\s\S])/gi;
+
+/** Raw CSSOM arguments precede browser escape normalization in rrweb. */
+function redactEscapedCssResources(css: string): string {
+  if (!css.includes("\\")) return css;
+  const parts: string[] = [];
+  let copied = 0;
+  // Match identifiers without a required suffix: a long plain text node is
+  // scanned once, rather than retrying a failing `url(` match at each letter.
+  const identifiers = new RegExp(CSS_IDENTIFIER);
+  for (let token = identifiers.exec(css); token; token = identifiers.exec(css)) {
+    const name = token[0].replace(CSS_ESCAPE, (_, hex: string | undefined, escaped: string | undefined) =>
+      hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : escaped ?? "").toLowerCase();
+    const bodyAt = identifiers.lastIndex;
+    let end = bodyAt;
+    let replacement: string | null = null;
+    if (name === "url" && css[bodyAt] === "(") {
+      let quote: string | null = null;
+      for (end = bodyAt + 1; end < css.length; end++) {
+        const char = css[end];
+        if (char === "\\") { end++; continue; }
+        if (quote) { if (char === quote) quote = null; }
+        else if (char === "'" || char === '"') quote = char;
+        else if (char === ")") { end++; break; }
+      }
+      end = Math.min(end, css.length);
+      if (css.slice(token.index, end).includes("\\")) replacement = `url("${REDACTED}")`;
+    } else if (name === "import" && css[token.index - 1] === "@") {
+      while (/\s/.test(css[end] ?? "") && end < css.length) end++;
+      const quote = css[end];
+      if (quote === "'" || quote === '"') {
+        for (end++; end < css.length; end++) {
+          if (css[end] === "\\") { end++; continue; }
+          if (css[end] === quote) { end++; break; }
+        }
+        end = Math.min(end, css.length);
+        if (css.slice(token.index, end).includes("\\")) replacement = `import ${quote}${REDACTED}${quote}`;
+      }
+    }
+    if (replacement !== null) {
+      parts.push(css.slice(copied, token.index), replacement);
+      copied = end;
+    }
+    identifiers.lastIndex = Math.max(end, bodyAt);
+  }
+  return copied === 0 ? css : parts.join("") + css.slice(copied);
+}
 // A `name=value` pair after `?`, `&`, `#` or `;` anywhere in the text, so a
-// credential survives neither a relative CSS URL nor a CSS escape.
+// credential does not survive an ordinary relative CSS URL.
 const PAIR_IN_TEXT = /([?&#;])([^=&#?;\s"'()<>`\\]+)=([^&#;\s"'()<>`\\]*)/g;
 
 /**
@@ -131,7 +179,7 @@ const PAIR_IN_TEXT = /([?&#;])([^=&#?;\s"'()<>`\\]+)=([^&#;\s"'()<>`\\]*)/g;
  */
 export function sanitizeCssText(css: string): string {
   return sanitizeReplayText(
-    css
+    redactEscapedCssResources(css)
       .replace(CSS_URL, (_, quote: string | undefined, quoted: string | undefined, unquoted: string | undefined) =>
         `url(${quote ?? ""}${sanitizeUrl((quoted ?? unquoted ?? "").trim())}${quote ?? ""})`)
       .replace(CSS_IMPORT, (_, quote: string, url: string) => `@import ${quote}${sanitizeUrl(url)}${quote}`),
