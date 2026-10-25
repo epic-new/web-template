@@ -9,8 +9,25 @@ import {
   sanitizeNetworkDiagnostic,
   sanitizeReplayError,
   sanitizeReplayPayload,
+  sanitizeReplayText,
   sanitizeUrl,
 } from "../replay-redaction";
+
+it("scans long non-URL text and malformed CSS without superlinear stalls", () => {
+  const text = `${"a".repeat(200_000)} ${"/segment".repeat(2_000)} https://u:p@app.test/a?token=secret /one/two?api_key=secret2`;
+  const start = performance.now();
+  const result = sanitizeReplayText(text, Number.POSITIVE_INFINITY);
+  const malformed = `url(${" ".repeat(2_000)}`;
+  expect(sanitizeCssText(malformed)).toBe(malformed);
+  const escaped = sanitizeCssText(`${"a".repeat(200_000)} ${String.raw`.hover\:state{background:u\72l("/a?\74oken=synthetic-escape")}`}`);
+  expect(escaped).not.toContain("synthetic-escape");
+  expect(escaped).toContain(String.raw`.hover\:state{background:url("[redacted]")}`);
+  expect(performance.now() - start).toBeLessThan(500);
+  expect(result).not.toContain("secret");
+  expect(result).not.toContain("u:p@");
+  expect(result).toContain("https://app.test/a?token=%5Bredacted%5D");
+  expect(result).toContain("/one/two?api_key=%5Bredacted%5D");
+});
 
 describe("sanitizeUrl", () => {
   it("redacts the Epic preview token and fragment credentials", () => {
@@ -101,6 +118,34 @@ describe("sanitizeNetworkDiagnostic", () => {
 });
 
 describe("sanitizeCssText", () => {
+  it.each([
+    String.raw`url("/a?\74oken=synthetic-escaped")`,
+    String.raw`url(/a?\000074 oken=synthetic-escaped)`,
+    String.raw`u\72l("/a?token=synthetic-escaped")`,
+    String.raw`u\000072 l("/a?token=synthetic-escaped")`,
+    "u\\72\r\nl(\"/a?token=synthetic-escaped\")",
+    String.raw`url('/a?tok\65n=synthetic-escaped\'tail')`,
+    String.raw`url(/a?tok\65n=synthetic-escaped\)tail)`,
+    String.raw`url("https://user:\70ass@app.test/a?ok=synthetic-escaped")`,
+  ])("fails closed for an escaped CSS resource: %s", (resource) => {
+    expect(sanitizeCssText(`.a{background:${resource};color:red}`)).toBe(
+      '.a{background:url("[redacted]");color:red}',
+    );
+  });
+
+  it("redacts escaped import URLs and preserves ordinary escaped selectors", () => {
+    expect(sanitizeCssText(String.raw`@im\70ort "a.css?\74oken=synthetic-import";`)).toBe('@import "[redacted]";');
+    expect(sanitizeCssText(String.raw`@import/*x*/"a.css?\74oken=synthetic-import";`)).toBe('@import "[redacted]";');
+    expect(sanitizeCssText(String.raw`@import /*"*/ /*y*/ 'a.css?\000074 oken=synthetic-import';`)).toBe("@import '[redacted]';");
+    expect(sanitizeCssText(String.raw`@import/*unfinished\escape`)).toBe(String.raw`@import/*unfinished\escape`);
+    const selector = String.raw`.hover\:bg-blue-500:hover,.w-\[10px\]{width:10px;background:url(/public.png)}`;
+    expect(sanitizeCssText(selector)).toBe(selector);
+    const quoted = String.raw`[data-label="url(a\)b)"] { color:red } .a::after{content:'url(a\)b)'}`;
+    expect(sanitizeCssText(quoted)).toBe(quoted);
+    expect(sanitizeCssText(String.raw`/* "quoted comment" */ .a{background:url(/a?\74oken=synthetic-escape)}`))
+      .toBe('/* "quoted comment" */ .a{background:url("[redacted]")}');
+  });
+
   it("redacts credentials in url(), @import and relative pairs and keeps the rule", () => {
     expect(sanitizeCssText(".a{background:url(\"/bg.png?token=synthetic-a\")}")).toBe(
       ".a{background:url(\"/bg.png?token=%5Bredacted%5D\")}",

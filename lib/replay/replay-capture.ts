@@ -41,7 +41,7 @@ type RecordFn = typeof rrwebRecord;
 
 export interface ReplayCaptureState {
   status: "capturing" | "blocked";
-  reason: ReplayBlockReason | null;
+  reason: ReplayBlockReason | "transport_unavailable" | null;
   boundary: number;
 }
 
@@ -253,20 +253,38 @@ export function createReplayCaptureSession({
       evaluate();
     },
 
+    /**
+     * Ends the current boundary and, if capture is still permitted, starts a
+     * new one at once with fresh Meta and FullSnapshot events. The upload
+     * pipeline calls it when a recording was lost (e.g. delivery uncertain).
+     */
+    restartBoundary(): void {
+      if (!started) return;
+      clearTimeout(pendingStart);
+      pendingStart = undefined;
+      stopRecorder();
+      const { policy, result } = permission(getPathname());
+      if (!result.allowed) {
+        block(result.reason);
+        return;
+      }
+      if (!failed) startRecorder(policy);
+    },
+
     /** Re-evaluates now, e.g. after the policy source was swapped. */
     refresh(): void {
       failed = false;
       evaluate();
     },
 
-    dispose(): void {
+    dispose(reason?: "transport_unavailable"): void {
       if (!started) return;
       started = false;
       clearTimeout(pendingStart);
       pendingStart = undefined;
       stopRecorder();
       for (const cleanup of cleanups.splice(0).reverse()) cleanup();
-      setState({ status: "blocked", reason: state.reason ?? "policy_disabled", boundary: state.boundary });
+      setState({ status: "blocked", reason: reason ?? state.reason ?? "policy_disabled", boundary: state.boundary });
     },
 
     getState(): ReplayCaptureState {

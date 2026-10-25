@@ -2,10 +2,10 @@
 
 import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
-import type { ReplayBlockReason } from '@/lib/replay/replay-permission'
+import type { ReplayCaptureState } from '@/lib/replay/replay-capture'
 import { usePreviewReplayCapture } from '../behaviors/preview-replay-capture/use-preview-replay-capture.hook'
 
-export function replayStatusLabel(status: 'capturing' | 'blocked', reason: ReplayBlockReason | null) {
+export function replayStatusLabel(status: 'capturing' | 'blocked', reason: ReplayCaptureState['reason']) {
   return status === 'capturing' ? 'Capturing' : `Blocked: ${reason ?? 'policy_disabled'}`
 }
 

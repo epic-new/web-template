@@ -15,7 +15,7 @@ export function activeReplayPolicy(
     ...base,
     status: "active",
     reason: null,
-    configVersion: "test-v1",
+    configVersion: "1",
     expiresAt: now + MAX_POLICY_TTL_MS,
     capture: {
       ...base.capture,

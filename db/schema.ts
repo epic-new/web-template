@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, primaryKey, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
@@ -70,3 +70,49 @@ export const verification = sqliteTable("verification", {
 
 export type InsertVerification = typeof verification.$inferInsert;
 export type SelectVerification = typeof verification.$inferSelect;
+
+/**
+ * Epic Replay recordings this server registered. Stores the normalized
+ * registration payload so a lost-response retry resends it verbatim, never
+ * events, upload tokens or raw identity.
+ */
+export const replayRecording = sqliteTable(
+  "replay_recording",
+  {
+    id: text("id").primaryKey(),
+    subjectId: text("subject_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    registrationHash: text("registration_hash").notNull(),
+    registrationPayload: text("registration_payload").notNull(),
+    recordingId: text("recording_id").unique(),
+    status: text("status", {
+      enum: ["registering", "open", "quarantined", "closed"],
+    }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("replay_recording_subject_key_idx").on(
+      table.subjectId,
+      table.idempotencyKey,
+    ),
+  ],
+);
+
+export type InsertReplayRecording = typeof replayRecording.$inferInsert;
+export type SelectReplayRecording = typeof replayRecording.$inferSelect;
+
+/** Fixed-window request counters per replay subject. */
+export const replayRateLimit = sqliteTable(
+  "replay_rate_limit",
+  {
+    subjectId: text("subject_id").notNull(),
+    bucket: text("bucket", { enum: ["register", "capability", "batch"] }).notNull(),
+    windowStartedAt: integer("window_started_at").notNull(),
+    count: integer("count").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.subjectId, table.bucket] })],
+);
+
+export type InsertReplayRateLimit = typeof replayRateLimit.$inferInsert;
+export type SelectReplayRateLimit = typeof replayRateLimit.$inferSelect;

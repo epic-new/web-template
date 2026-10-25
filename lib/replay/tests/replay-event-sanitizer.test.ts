@@ -41,9 +41,18 @@ describe("sanitizeReplayEvent", () => {
     );
 
     const json = JSON.stringify([meta, snapshot]);
+    expect((meta.data as { href: string }).href).toBe("https://app.test/");
     expect(json).not.toMatch(/synthetic-(access-token|proxy-token|sig|csrf|text-token)/);
     expect(json).toContain("%5Bredacted%5D");
     expect(json).toContain("/b.png 2x");
+  });
+
+  it("keeps Meta document URLs query-free for the central publishing contract", () => {
+    const result = sanitizeReplayEvent(event({
+      type: EventType.Meta, timestamp: 1,
+      data: { href: "https://app.test/orders?tab=open#details", width: 1, height: 1 },
+    }));
+    expect((result.data as { href: string }).href).toBe("https://app.test/orders");
   });
 
   it("sanitizes added nodes, attribute changes and text changes in mutations", () => {

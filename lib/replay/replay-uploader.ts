@@ -1,0 +1,910 @@
+import type { eventWithTime } from "@rrweb/types";
+
+import type { PublicReplayConfig } from "./replay-config.contract";
+import type { ReplayEventSink } from "./replay-buffer";
+import { jsonByteLength } from "./replay-redaction";
+import {
+  MAX_REPLAY_RELEASE_LENGTH,
+  parseReplayUploadError,
+  REPLAY_RECORDER_VERSION,
+  REPLAY_SUBJECT_ALLOWANCE_BYTES,
+  REPLAY_TOKEN_MAX_LENGTH,
+  REPLAY_UPLOAD_CONTRACT_VERSION,
+  replayBatchAcknowledgmentSchema,
+  replayIdentityResponseSchema,
+  replayRecordingCapabilitySchema,
+  safeReplayPathname,
+  type ReplayAvailability,
+  type ReplayBatchRequest,
+  type ReplayRegistrationRequest,
+  type ReplayUploadErrorCode,
+  type ReplayViewport,
+} from "./replay-upload-contract";
+
+/**
+ * The browser upload transport for Epic Replay (see docs/replay-privacy.md).
+ *
+ * A `ReplayEventSink`: the capture session pushes sanitized events per
+ * boundary, and each boundary becomes one recording. The transport registers
+ * first (no event leaves before a successful registration), then uploads
+ * ordered, frozen batches one request at a time through this application's
+ * same-origin relay. Every retry resends the identical frozen body; nothing
+ * is renumbered, skipped or truncated. Local memory is bounded by bytes and
+ * by age, measured on a monotonic clock that wall-clock jumps cannot extend.
+ *
+ * Its state is honest: a registration or an accepted batch is never evidence
+ * of playback (`evidence` is always "unverified"). It never throws into the
+ * recorder, rendering, navigation or forms; failures only change state.
+ */
+
+type Limits = PublicReplayConfig["recording"]["limits"];
+
+export type ReplayUploadStatus = "idle" | "recorder_started" | "registered" | "uploading" | "pending" | "unavailable";
+export type ReplayUploadReason =
+  | null
+  | ReplayUploadErrorCode
+  | "offline"
+  | "buffer_exceeded"
+  | "attempts_exhausted"
+  | "snapshot_too_large";
+
+/** Frozen once a registration succeeds; never replaced or moved. */
+export interface ReplayRecordingReference {
+  readonly recordingId: string;
+  readonly startedAt: number;
+  readonly boundary: number;
+}
+
+export interface ReplayRecordingHistoryEntry {
+  readonly reference: ReplayRecordingReference;
+  readonly outcome: "open" | "incomplete" | "closed" | "unavailable";
+  readonly reason: ReplayUploadReason;
+  readonly acceptedBatches: number;
+  readonly availability: ReplayAvailability | null;
+}
+
+export interface ReplayUploadState {
+  readonly status: ReplayUploadStatus;
+  readonly reason: ReplayUploadReason;
+  readonly current: ReplayRecordingReference | null;
+  readonly history: readonly ReplayRecordingHistoryEntry[];
+  readonly bufferedEvents: number;
+  readonly bufferedBytes: number;
+  readonly evidence: "unverified";
+}
+
+export type ReplayErrorAction = "stop" | "renew" | "restart" | "retry" | "quarantine";
+
+/** The normative EPI-210 v1 client action for every code. */
+export const REPLAY_ERROR_ACTIONS: Record<ReplayUploadErrorCode, ReplayErrorAction> = {
+  // A server credential failure: never "repaired" by capability renewal.
+  REPLAY_CREDENTIAL_INVALID: "stop",
+  capability_expired: "renew",
+  invalid_capability: "restart",
+  subject_mismatch: "restart",
+  capture_disabled: "stop",
+  reporting_disabled: "stop",
+  recording_not_found: "restart",
+  idempotency_conflict: "stop",
+  out_of_order: "restart",
+  upload_in_progress: "retry",
+  recording_closed: "restart",
+  delivery_uncertain: "quarantine",
+  payload_too_large: "stop",
+  invalid_request: "stop",
+  invalid_evidence: "stop",
+  rate_limited: "retry",
+  unavailable: "retry",
+  cross_origin: "stop",
+  unsupported_media_type: "stop",
+  identity_required: "stop",
+  not_configured: "stop",
+};
+
+export const REPLAY_RETRY_BACKOFF_MS = [500, 1_000, 2_000] as const;
+const KEEPALIVE_MAX_BYTES = 64 * 1024;
+const HISTORY_LIMIT = 10;
+const TICK_MS = 1_000;
+export const REPLAY_UPLOAD_REQUEST_TIMEOUT_MS = 12_000;
+const MAX_CLOSING_RECORDINGS = 1;
+
+export interface ReplayUploaderOptions {
+  getLimits: () => Limits;
+  getConfigVersion: () => string | null;
+  /** The document/build-bound release, never the latest policy's; null when unknown. */
+  getDocumentRelease?: () => string | null;
+  fetch?: typeof fetch;
+  monotonicNow?: () => number;
+  wallNow?: () => number;
+  isOnline?: () => boolean;
+  getViewport?: () => ReplayViewport | null;
+  getRoute?: () => string;
+  randomUUID?: () => string;
+  /** A recording ended in a way that permits a fresh one (new boundary). */
+  onRecordingLost?: (reason: ReplayUploadReason) => void;
+  baseUrl?: string;
+}
+
+interface Queued {
+  event: eventWithTime;
+  bytes: number;
+  mono: number;
+  wall: number;
+}
+
+interface FrozenBatch {
+  body: ReplayBatchRequest;
+  eventBytes: number;
+  oldest: { mono: number; wall: number };
+  renewed: boolean;
+  attempts: number;
+}
+
+interface Recording {
+  boundary: number;
+  phase: "registering" | "open" | "ended";
+  registration: ReplayRegistrationRequest;
+  registrationAttempts: number;
+  identityAttempts: number;
+  identityReady: boolean;
+  renewAttempts: number;
+  renewing: boolean;
+  reference: ReplayRecordingReference | null;
+  token: string | null;
+  limits: Limits;
+  nextSequence: number;
+  queue: Queued[];
+  queueBytes: number;
+  inflight: FrozenBatch | null;
+  busy: boolean;
+  abortController: AbortController | null;
+  retryTimer: ReturnType<typeof setTimeout> | undefined;
+  lastFlushAt: number;
+  finalRequested: boolean;
+  acceptedBatches: number;
+  availability: ReplayAvailability | null;
+  outcome: ReplayRecordingHistoryEntry["outcome"];
+  reason: ReplayUploadReason;
+  offline: boolean;
+}
+
+type Outcome =
+  | { kind: "ok"; payload: unknown }
+  | { kind: "error"; code: ReplayUploadErrorCode; retryAfterMs?: number }
+  | { kind: "transient"; retryAfterMs?: number }
+  | { kind: "invalid" };
+
+function defaultViewport(): ReplayViewport | null {
+  if (typeof window === "undefined") return null;
+  const clamp = (value: number) => Math.min(Math.max(Math.round(value), 1), 16_384);
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  return width > 0 && height > 0 ? { width: clamp(width), height: clamp(height) } : null;
+}
+
+function documentRelease(value: string | null): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= MAX_REPLAY_RELEASE_LENGTH && /^[A-Za-z0-9._+\-/]+$/.test(trimmed) ? trimmed : null;
+}
+
+export function createReplayUploader({
+  getLimits,
+  getConfigVersion,
+  getDocumentRelease = () => null,
+  fetch: fetchImpl = ((input, init) => fetch(input, init)) as typeof fetch,
+  monotonicNow = () => performance.now(),
+  wallNow = () => Date.now(),
+  isOnline = () => typeof navigator === "undefined" || navigator.onLine !== false,
+  getViewport = defaultViewport,
+  getRoute = () => (typeof window === "undefined" ? "/" : window.location.pathname),
+  randomUUID = () => crypto.randomUUID(),
+  onRecordingLost = () => {},
+  baseUrl = "/api/epic/replay",
+}: ReplayUploaderOptions) {
+  let current: Recording | null = null;
+  // Older recordings still sending their final batch.
+  let closing: Recording[] = [];
+  let terminal: { status: ReplayUploadStatus; reason: ReplayUploadReason } = { status: "idle", reason: null };
+  let history: readonly ReplayRecordingHistoryEntry[] = [];
+  let historyRecordings: Recording[] = [];
+  // The newest boundary ever started: older or finished boundaries never restart.
+  let lastBoundary = 0;
+  let generation = 0;
+  let halted = false;
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  let requestOwner: Recording | null = null;
+  const listeners = new Set<() => void>();
+  let state: ReplayUploadState = buildState();
+
+  // ---- state -------------------------------------------------------------
+
+  function liveRecordings(): Recording[] {
+    return [current, ...closing].filter((rec): rec is Recording => rec !== null && rec.phase !== "ended");
+  }
+
+  function pendingBytes(rec: Recording): number {
+    return rec.queueBytes + (rec.inflight?.eventBytes ?? 0);
+  }
+
+  function buildState(): ReplayUploadState {
+    const rec = current;
+    let status = terminal.status;
+    let reason = terminal.reason;
+    if (rec && rec.phase !== "ended") {
+      reason = rec.offline ? "offline" : null;
+      if (rec.phase === "registering") status = "recorder_started";
+      else if (rec.offline) status = "pending";
+      else if (rec.busy || rec.inflight) status = "uploading";
+      else status = rec.acceptedBatches > 0 ? "pending" : "registered";
+    } else if (rec) {
+      status = "unavailable";
+      reason = rec.reason;
+    }
+    const live = rec && rec.phase !== "ended" ? rec : null;
+    const pending = liveRecordings();
+    return {
+      status,
+      reason,
+      current: live?.reference ?? null,
+      history,
+      bufferedEvents: pending.reduce((count, item) => count + item.queue.length + (item.inflight?.body.events.length ?? 0), 0),
+      bufferedBytes: pending.reduce((bytes, item) => bytes + pendingBytes(item), 0),
+      evidence: "unverified",
+    };
+  }
+
+  function recordHistory(rec: Recording) {
+    if (!rec.reference) return;
+    if (!historyRecordings.includes(rec)) historyRecordings = [rec, ...historyRecordings].slice(0, HISTORY_LIMIT);
+    history = historyRecordings.map(
+      (entry): ReplayRecordingHistoryEntry => ({
+        reference: entry.reference!,
+        outcome: entry.outcome,
+        reason: entry.reason,
+        acceptedBatches: entry.acceptedBatches,
+        availability: entry.availability,
+      }),
+    );
+  }
+
+  function notify() {
+    state = buildState();
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // A subscriber's failure is not the transport's.
+      }
+    }
+  }
+
+  // ---- lifecycle ---------------------------------------------------------
+
+  function ensureTicker() {
+    if (ticker !== undefined) return;
+    ticker = setInterval(() => safely(tick), TICK_MS);
+  }
+
+  function stopTickerIfIdle() {
+    const live = [current, ...closing].some((rec) => rec && rec.phase !== "ended");
+    if (!live && ticker !== undefined) {
+      clearInterval(ticker);
+      ticker = undefined;
+    }
+  }
+
+  function tick() {
+    for (const rec of [current, ...closing]) {
+      if (!rec || rec.phase === "ended") continue;
+      if (!checkRetention(rec)) continue;
+      pump(rec);
+    }
+    notify();
+  }
+
+  function safely(run: () => void) {
+    try {
+      run();
+    } catch {
+      // Every internal failure becomes state, never an exception for callers.
+      if (current && current.phase !== "ended") end(current, "unavailable", "unavailable", false);
+      notify();
+    }
+  }
+
+  function startRecording(boundary: number, first: eventWithTime): Recording {
+    const configVersion = getConfigVersion();
+    const limits = getLimits();
+    const viewport = getViewport();
+    const rec: Recording = {
+      boundary,
+      phase: "registering",
+      registration: {
+        contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
+        idempotencyKey: randomUUID(),
+        startedAt: first.timestamp,
+        route: safeReplayPathname(getRoute()) ?? "/",
+        recorderVersion: REPLAY_RECORDER_VERSION,
+        configVersion: configVersion ?? "",
+        release: documentRelease(getDocumentRelease()),
+        viewport: viewport ? { width: viewport.width, height: viewport.height } : null,
+      },
+      registrationAttempts: 0,
+      identityAttempts: 0,
+      identityReady: false,
+      renewAttempts: 0,
+      renewing: false,
+      reference: null,
+      token: null,
+      limits: { ...limits },
+      nextSequence: 0,
+      queue: [],
+      queueBytes: 0,
+      inflight: null,
+      busy: false,
+      abortController: null,
+      retryTimer: undefined,
+      lastFlushAt: monotonicNow(),
+      finalRequested: false,
+      acceptedBatches: 0,
+      availability: null,
+      outcome: "open",
+      reason: null,
+      offline: false,
+    };
+    Object.freeze(rec.registration);
+    if (!configVersion || !configVersion.trim()) end(rec, "not_configured", "unavailable", false);
+    return rec;
+  }
+
+  /** Ends a recording: discards its local events and timers; history keeps its reference. */
+  function end(
+    rec: Recording,
+    reason: ReplayUploadReason,
+    outcome: ReplayRecordingHistoryEntry["outcome"],
+    lost: boolean,
+  ) {
+    if (rec.phase === "ended") return;
+    rec.phase = "ended";
+    rec.reason = reason;
+    rec.outcome = rec.reference ? outcome : "unavailable";
+    rec.queue = [];
+    rec.queueBytes = 0;
+    rec.inflight = null;
+    rec.token = null;
+    rec.abortController?.abort();
+    clearTimeout(rec.retryTimer);
+    rec.retryTimer = undefined;
+    recordHistory(rec);
+    if (rec === current) terminal = { status: "unavailable", reason };
+    closing = closing.filter((other) => other !== rec);
+    stopTickerIfIdle();
+    if (lost && rec === current && !halted) {
+      try {
+        onRecordingLost(reason);
+      } catch {
+        // The pipeline's own failure stays out of the transport.
+      }
+    }
+  }
+
+  function retireCurrent() {
+    const old = current;
+    current = null;
+    if (!old || old.phase === "ended") return;
+    // The previous boundary is finished: flush what remains and finalize.
+    old.finalRequested = true;
+    closing.push(old);
+    while (closing.length > MAX_CLOSING_RECORDINGS) end(closing[0]!, "unavailable", "incomplete", false);
+    pump(old);
+  }
+
+  // ---- bounds ------------------------------------------------------------
+
+  /** Bytes of a batch body without events, for the current token, plus the subject allowance. */
+  function envelopeBytes(rec: Recording) {
+    const skeleton = {
+      contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
+      recordingToken: "x".repeat(REPLAY_TOKEN_MAX_LENGTH),
+      batchId: "00000000-0000-4000-8000-000000000000",
+      sequence: Math.max(rec.nextSequence, 1_000_000_000),
+      events: [],
+      final: false,
+    };
+    return jsonByteLength(skeleton) + REPLAY_SUBJECT_ALLOWANCE_BYTES;
+  }
+
+  function fitsAlone(rec: Recording, bytes: number) {
+    return envelopeBytes(rec) + bytes <= rec.limits.maxBatchBytes;
+  }
+
+  function elapsed(since: { mono: number; wall: number }) {
+    // Uncertain elapsed time counts against retention: a suspension or a
+    // forward wall-clock jump discards, a backward jump never extends.
+    return Math.max(monotonicNow() - since.mono, wallNow() - since.wall, 0);
+  }
+
+  /** False when the recording just ended for exceeding its retention. */
+  function checkRetention(rec: Recording): boolean {
+    const oldest = rec.inflight?.oldest ?? rec.queue[0];
+    if (oldest && elapsed(oldest) >= rec.limits.maxBufferAgeMs) {
+      end(rec, "buffer_exceeded", "incomplete", true);
+      return false;
+    }
+    // A boundary rollover may leave one older finalization in flight, but
+    // that must not double the pipeline's private-data budget.
+    const budget = Math.min(...liveRecordings().map((item) => item.limits.maxBufferBytes));
+    for (const old of [...closing]) {
+      if (liveRecordings().reduce((bytes, item) => bytes + pendingBytes(item), 0) <= budget) break;
+      end(old, "buffer_exceeded", "incomplete", false);
+    }
+    if (rec.phase === "ended") return false;
+    if (pendingBytes(rec) > budget) {
+      end(rec, "buffer_exceeded", "incomplete", true);
+      return false;
+    }
+    return true;
+  }
+
+  // ---- transport ---------------------------------------------------------
+
+  async function send(rec: Recording, path: string, body: unknown, keepalive = false): Promise<Outcome | null> {
+    const startedIn = generation;
+    const controller = new AbortController();
+    rec.abortController = controller;
+    requestOwner = rec;
+    rec.busy = true;
+    const oldest = rec.inflight?.oldest ?? rec.queue[0];
+    const remaining = oldest ? Math.max(0, rec.limits.maxBufferAgeMs - elapsed(oldest)) : REPLAY_UPLOAD_REQUEST_TIMEOUT_MS;
+    const deadline = setTimeout(() => controller.abort(), Math.min(REPLAY_UPLOAD_REQUEST_TIMEOUT_MS, remaining));
+    notify();
+    let outcome: Outcome;
+    try {
+      const response = await fetchImpl(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(body),
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: controller.signal,
+        ...(keepalive ? { keepalive: true } : {}),
+      });
+      let payload: unknown = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      if (response.ok) {
+        outcome = { kind: "ok", payload };
+      } else {
+        const parsed = parseReplayUploadError(response.status, payload);
+        if (parsed) outcome = { kind: "error", code: parsed.code, retryAfterMs: parsed.retryAfterMs };
+        else outcome = response.status >= 500 ? { kind: "transient" } : { kind: "invalid" };
+      }
+    } catch {
+      outcome = { kind: "transient" };
+    } finally {
+      clearTimeout(deadline);
+      rec.abortController = null;
+      if (requestOwner === rec) requestOwner = null;
+      rec.busy = false;
+      if (liveRecordings().length > 0) {
+        clearTimeout(wakeTimer);
+        // Let the request's own continuation apply its receipt before waking
+        // another recording; otherwise the just-accepted batch can be resent.
+        wakeTimer = setTimeout(() => {
+          wakeTimer = undefined;
+          safely(() => {
+            for (const pending of [...closing, current]) {
+              if (pending && pending.phase !== "ended" && checkRetention(pending)) pump(pending);
+            }
+          });
+        }, 0);
+      }
+    }
+    // A clear() or end() while in flight: the answer has nowhere to go.
+    if (startedIn !== generation || rec.phase === "ended") return null;
+    return outcome;
+  }
+
+  /** Waits before the next attempt; false when attempts are exhausted. */
+  function scheduleRetry(rec: Recording, attempts: number, retryAfterMs?: number): boolean {
+    if (attempts >= rec.limits.maxAttempts) {
+      end(rec, "attempts_exhausted", "incomplete", false);
+      return false;
+    }
+    const step = Math.min(Math.max(attempts - 1, 0), REPLAY_RETRY_BACKOFF_MS.length - 1);
+    const backoff = REPLAY_RETRY_BACKOFF_MS[step]!;
+    const delay = Math.max(backoff, retryAfterMs ?? 0);
+    clearTimeout(rec.retryTimer);
+    rec.retryTimer = setTimeout(() => {
+      rec.retryTimer = undefined;
+      safely(() => {
+        if (checkRetention(rec)) pump(rec);
+        notify();
+      });
+    }, delay);
+    return true;
+  }
+
+  /** Applies the v1 action table to a failed request. */
+  function fail(rec: Recording, outcome: Exclude<Outcome, { kind: "ok" }>, attempts: number): "retry" | "renew" | "ended" {
+    if (outcome.kind === "invalid") {
+      end(rec, "unavailable", "unavailable", false);
+      return "ended";
+    }
+    if (outcome.kind === "transient" || REPLAY_ERROR_ACTIONS[outcome.code] === "retry") {
+      return scheduleRetry(rec, attempts, outcome.retryAfterMs) ? "retry" : "ended";
+    }
+    const action = REPLAY_ERROR_ACTIONS[outcome.code];
+    if (action === "renew") return "renew";
+    if (action === "quarantine") end(rec, outcome.code, "incomplete", true);
+    else if (action === "restart") end(rec, outcome.code, "incomplete", true);
+    else end(rec, outcome.code, rec.reference ? "incomplete" : "unavailable", false);
+    return "ended";
+  }
+
+  // Offline attempts are not spent: the request is simply not made.
+  function offline(rec: Recording): boolean {
+    rec.offline = !isOnline();
+    return rec.offline;
+  }
+
+  function pump(rec: Recording) {
+    if (rec.phase === "ended" || rec.busy || requestOwner !== null || rec.retryTimer !== undefined) return;
+    if (offline(rec)) {
+      ensureTicker();
+      return;
+    }
+    if (rec.phase === "registering") {
+      if (rec.identityReady) void register(rec);
+      else void establishIdentity(rec);
+      return;
+    }
+    if (rec.renewing) {
+      void renew(rec);
+      return;
+    }
+    if (rec.inflight) {
+      void upload(rec);
+      return;
+    }
+    const due =
+      rec.finalRequested ||
+      rec.queue.length >= rec.limits.maxBatchEvents ||
+      envelopeBytes(rec) + rec.queueBytes + rec.queue.length >= rec.limits.maxBatchBytes ||
+      (rec.queue.length > 0 && monotonicNow() - rec.lastFlushAt >= rec.limits.flushIntervalMs);
+    if (!due) return;
+    if (rec.queue.length === 0 && !rec.finalRequested) return;
+    rec.inflight = freeze(rec);
+    void upload(rec);
+  }
+
+  /** Freezes the next batch: id, sequence, events and final never change after this. */
+  function freeze(rec: Recording): FrozenBatch {
+    const budget = rec.limits.maxBatchBytes - envelopeBytes(rec);
+    const taken: Queued[] = [];
+    let bytes = 0;
+    for (const item of rec.queue) {
+      if (taken.length >= rec.limits.maxBatchEvents) break;
+      const next = bytes + item.bytes + (taken.length > 0 ? 1 : 0);
+      if (next > budget) break;
+      taken.push(item);
+      bytes = next;
+    }
+    rec.queue = rec.queue.slice(taken.length);
+    rec.queueBytes -= taken.reduce((sum, item) => sum + item.bytes, 0);
+    rec.lastFlushAt = monotonicNow();
+    const oldest = taken[0] ?? { mono: monotonicNow(), wall: wallNow() };
+    const body: ReplayBatchRequest = Object.freeze({
+      contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
+      recordingToken: rec.token!,
+      batchId: randomUUID(),
+      sequence: rec.nextSequence,
+      events: Object.freeze(taken.map((item) => item.event)) as ReplayBatchRequest["events"],
+      final: rec.finalRequested && rec.queue.length === 0,
+    });
+    return {
+      body,
+      eventBytes: taken.reduce((sum, item) => sum + item.bytes, 0),
+      oldest: { mono: oldest.mono, wall: oldest.wall },
+      renewed: false,
+      attempts: 0,
+    };
+  }
+
+  async function establishIdentity(rec: Recording) {
+    rec.identityAttempts++;
+    const outcome = await send(rec, "/identity", { contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION });
+    if (!outcome) return;
+    if (outcome.kind !== "ok") {
+      if (offline(rec) && outcome.kind === "transient") rec.identityAttempts--;
+      if (fail(rec, outcome, rec.identityAttempts) === "renew") end(rec, "identity_required", "unavailable", false);
+      notify();
+      return;
+    }
+    if (!replayIdentityResponseSchema.safeParse(outcome.payload).success) {
+      end(rec, "unavailable", "unavailable", false);
+      notify();
+      return;
+    }
+    rec.identityReady = true;
+    if (checkRetention(rec)) pump(rec);
+    notify();
+  }
+
+  async function register(rec: Recording) {
+    rec.registrationAttempts++;
+    const outcome = await send(rec, "/recordings", rec.registration);
+    if (!outcome) return;
+    if (outcome.kind !== "ok") {
+      if (offline(rec) && outcome.kind === "transient") rec.registrationAttempts--;
+      if (fail(rec, outcome, rec.registrationAttempts) === "renew") end(rec, "unavailable", "unavailable", false);
+      notify();
+      return;
+    }
+    const parsed = replayRecordingCapabilitySchema.safeParse(outcome.payload);
+    if (!parsed.success || parsed.data.startedAt !== rec.registration.startedAt) {
+      end(rec, "unavailable", "unavailable", false);
+      notify();
+      return;
+    }
+    const capability = parsed.data;
+    // This new boundary has not uploaded anything before receiving its first
+    // registration acknowledgment. A nonzero sequence belongs to a producer
+    // whose history this instance cannot prove; never splice our snapshot in.
+    if (capability.nextSequence !== 0) {
+      end(rec, "out_of_order", "incomplete", true);
+      notify();
+      return;
+    }
+    rec.reference = Object.freeze({
+      recordingId: capability.recordingId,
+      startedAt: capability.startedAt,
+      boundary: rec.boundary,
+    });
+    rec.token = capability.recordingToken;
+    rec.limits = { ...capability.limits };
+    rec.nextSequence = capability.nextSequence;
+    rec.availability = capability.availability;
+    rec.phase = "open";
+    rec.lastFlushAt = monotonicNow();
+    recordHistory(rec);
+    // An event too large for the recording's own limits is never truncated.
+    if (rec.queue.some((item) => !fitsAlone(rec, item.bytes))) {
+      end(rec, "snapshot_too_large", "unavailable", false);
+    } else if (checkRetention(rec)) {
+      ensureTicker();
+      pump(rec);
+    }
+    notify();
+  }
+
+  async function renew(rec: Recording) {
+    rec.renewAttempts++;
+    const outcome = await send(rec, `/recordings/${encodeURIComponent(rec.reference!.recordingId)}/capability`, {
+      contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION,
+    });
+    if (!outcome) return;
+    if (outcome.kind !== "ok") {
+      if (offline(rec) && outcome.kind === "transient") rec.renewAttempts--;
+      // An expired capability on renewal is not renewed again.
+      if (fail(rec, outcome, rec.renewAttempts) === "renew") end(rec, "capability_expired", "incomplete", false);
+      notify();
+      return;
+    }
+    const parsed = replayRecordingCapabilitySchema.safeParse(outcome.payload);
+    if (
+      !parsed.success ||
+      parsed.data.recordingId !== rec.reference!.recordingId ||
+      parsed.data.startedAt !== rec.reference!.startedAt
+    ) {
+      end(rec, "unavailable", "incomplete", false);
+      notify();
+      return;
+    }
+    // Only the capability changes: renewal's nextSequence is diagnostic and
+    // never renumbers the pending batch.
+    rec.token = parsed.data.recordingToken;
+    rec.availability = parsed.data.availability;
+    rec.renewing = false;
+    rec.renewAttempts = 0;
+    if (rec.inflight) {
+      rec.inflight = { ...rec.inflight, body: Object.freeze({ ...rec.inflight.body, recordingToken: rec.token }) };
+    }
+    pump(rec);
+    notify();
+  }
+
+  async function upload(rec: Recording, keepalive = false) {
+    const batch = rec.inflight!;
+    batch.attempts++;
+    const outcome = await send(
+      rec,
+      `/recordings/${encodeURIComponent(rec.reference!.recordingId)}/batches`,
+      batch.body,
+      keepalive,
+    );
+    if (!outcome) return;
+    if (outcome.kind !== "ok") {
+      if (offline(rec) && outcome.kind === "transient") batch.attempts--;
+      const next = fail(rec, outcome, batch.attempts);
+      if (next === "renew") {
+        if (batch.renewed) {
+          end(rec, "capability_expired", "incomplete", false);
+        } else {
+          batch.renewed = true;
+          rec.renewing = true;
+          pump(rec);
+        }
+      }
+      notify();
+      return;
+    }
+    const parsed = replayBatchAcknowledgmentSchema.safeParse(outcome.payload);
+    if (
+      !parsed.success ||
+      parsed.data.recordingId !== rec.reference!.recordingId ||
+      parsed.data.batchId !== batch.body.batchId ||
+      parsed.data.sequence !== batch.body.sequence ||
+      (parsed.data.delivery === "finalized") !== (batch.body.events.length === 0 && batch.body.final)
+    ) {
+      end(rec, "unavailable", "incomplete", false);
+      notify();
+      return;
+    }
+    rec.inflight = null;
+    rec.nextSequence = parsed.data.nextSequence;
+    rec.availability = parsed.data.availability;
+    if (parsed.data.delivery === "accepted") rec.acceptedBatches++;
+    if (batch.body.final) {
+      rec.outcome = "closed";
+      rec.phase = "ended";
+      rec.token = null;
+      rec.reason = null;
+      recordHistory(rec);
+      closing = closing.filter((other) => other !== rec);
+      if (rec === current) {
+        current = null;
+        terminal = { status: "idle", reason: null };
+      }
+      stopTickerIfIdle();
+    } else {
+      recordHistory(rec);
+      pump(rec);
+    }
+    notify();
+  }
+
+  // ---- sink --------------------------------------------------------------
+
+  function push(event: eventWithTime, boundary: number) {
+    if (halted) return;
+    if (boundary < lastBoundary || (boundary === lastBoundary && current?.boundary !== boundary)) return;
+    if (boundary > lastBoundary) {
+      retireCurrent();
+      lastBoundary = boundary;
+      current = startRecording(boundary, event);
+      terminal = { status: "idle", reason: null };
+    }
+    const rec = current!;
+    if (rec.phase === "ended") {
+      notify();
+      return;
+    }
+    // Own the serialized event so a producer cannot change a pending batch
+    // after its identity and byte budget have been frozen.
+    const serialized = JSON.stringify(event);
+    const bytes = new TextEncoder().encode(serialized).byteLength;
+    if (!fitsAlone(rec, bytes)) {
+      end(rec, "snapshot_too_large", "unavailable", false);
+      notify();
+      return;
+    }
+    rec.queue.push({ event: JSON.parse(serialized) as eventWithTime, bytes, mono: monotonicNow(), wall: wallNow() });
+    rec.queueBytes += bytes;
+    ensureTicker();
+    if (checkRetention(rec)) pump(rec);
+    notify();
+  }
+
+  function dropAll() {
+    generation++;
+    for (const rec of [current, ...closing]) {
+      if (!rec || rec.phase === "ended") continue;
+      // Withdrawal drops local data only; nothing already uploaded is deleted.
+      end(rec, null, "incomplete", false);
+    }
+    current = null;
+    closing = [];
+    terminal = { status: "idle", reason: null };
+    if (ticker !== undefined) clearInterval(ticker);
+    ticker = undefined;
+    clearTimeout(wakeTimer);
+    wakeTimer = undefined;
+  }
+
+  const uploader = {
+    push(event: eventWithTime, boundary: number): void {
+      safely(() => push(event, boundary));
+    },
+
+    /** Consent withdrawal: drops queued capture data and timers, keeps history. */
+    clear(): void {
+      safely(() => {
+        dropAll();
+        notify();
+      });
+    },
+
+    /**
+     * Best effort on pagehide: one final keepalive request, only when its
+     * entire encoded body is <= 64 KiB and nothing else is in flight. Never
+     * bypasses one-in-flight or retention bounds, and promises nothing.
+     */
+    flushOnPageHide(): void {
+      safely(() => {
+        const rec = current;
+        if (!rec || rec.phase !== "open" || rec.busy || requestOwner !== null || rec.inflight || rec.retryTimer !== undefined || rec.offline) return;
+        if (!checkRetention(rec)) return;
+        rec.finalRequested = true;
+        const batch = freeze(rec);
+        if (rec.queue.length > 0 || jsonByteLength(batch.body) > KEEPALIVE_MAX_BYTES) {
+          // Too large for keepalive: put the events back unchanged.
+          rec.queue = [
+            ...batch.body.events.map((event) => ({ event, bytes: jsonByteLength(event), mono: batch.oldest.mono, wall: batch.oldest.wall })),
+            ...rec.queue,
+          ];
+          rec.queueBytes += batch.eventBytes;
+          rec.finalRequested = false;
+          return;
+        }
+        rec.inflight = batch;
+        void upload(rec, true);
+        notify();
+      });
+    },
+
+    /** Stops for good (e.g. the restart budget is spent); state stays as it is. */
+    halt(): void {
+      halted = true;
+    },
+
+    /** Only an explicit pipeline restart releases its exhausted recovery budget. */
+    resume(): void {
+      halted = false;
+    },
+
+    dispose(): void {
+      safely(() => {
+        dropAll();
+        halted = true;
+        notify();
+      });
+    },
+
+    /** Only ever a reference returned by a successful registration in this tab. */
+    getRecordingReference(): ReplayRecordingReference | null {
+      return state.current;
+    },
+
+    /** Stable between changes, so it can back `useSyncExternalStore`. */
+    getState(): ReplayUploadState {
+      return state;
+    },
+
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  } satisfies ReplayEventSink & Record<string, unknown>;
+
+  return uploader;
+}
+
+export type ReplayUploader = ReturnType<typeof createReplayUploader>;

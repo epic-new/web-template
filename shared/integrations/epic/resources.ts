@@ -1,5 +1,13 @@
 import "server-only";
 
+import type { ReplayCaptureContext } from "@/lib/replay/server/capture-context";
+import type {
+  ReplayBatchAcknowledgment,
+  ReplayBatchRequest,
+  ReplayRecordingCapability,
+  ReplayRegistrationRequest,
+} from "@/lib/replay/replay-upload-contract";
+
 /**
  * The EPI-209 (version 1) server-to-server runtime config resource. The
  * publishing credential selects the project, application and environment;
@@ -38,3 +46,32 @@ export interface RuntimeConfigResource {
     };
   };
 }
+
+/**
+ * EPI-210 (version 1) recording publishing resources. The publishing
+ * credential selects project, application and environment; the application
+ * server adds only the trusted opaque `subjectId` (and, at registration, the
+ * coarse `captureContext` it derived from its own request).
+ */
+export type RecordingRegistrationPayload = Omit<ReplayRegistrationRequest, "viewport"> & {
+  subjectId: string;
+  captureContext: ReplayCaptureContext;
+};
+
+export interface RecordingCapabilityPayload {
+  contractVersion: 1;
+  subjectId: string;
+}
+
+export type RecordingBatchPayload = ReplayBatchRequest & { subjectId: string };
+
+/** Registration and renewal share one full shape. */
+export type CapabilityResource = ReplayRecordingCapability;
+
+export interface RegistrationResource {
+  /** 201 for a new recording, 200 for an idempotent retry of an open one. */
+  created: boolean;
+  recording: CapabilityResource;
+}
+
+export type BatchAcknowledgmentResource = ReplayBatchAcknowledgment;

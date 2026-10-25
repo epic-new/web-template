@@ -208,6 +208,7 @@ describe("createReplayCaptureSession", () => {
       session.start();
 
       sheet.insertRule(".b { background: url(/b.png?sig=synthetic-insert); }", 0);
+      sheet.insertRule(String.raw`.escaped { background: url("/a?\000074 oken=synthetic-css-escape"); }`, 0);
       (sheet.cssRules[1] as CSSStyleRule).style.setProperty("background-image", "url(/c.png?jwt=synthetic-setproperty)");
       (document.getElementById("styled") as HTMLElement).style.setProperty(
         "background-image",
@@ -228,6 +229,8 @@ describe("createReplayCaptureSession", () => {
       expect(sources).toContain(IncrementalSource.StyleSheetRule);
       const stored = json();
       expect(stored).not.toMatch(/synthetic-(csstext|insert|setproperty|diff|rrsrc|adopted)/);
+      expect(stored).not.toContain("synthetic-css-escape");
+      expect(stored).toContain(".escaped");
       expect(stored).toContain("%5Bredacted%5D");
       expect(getComputedStyle(document.getElementById("styled")!).color).toBe("rgb(255, 0, 0)");
       document.head.innerHTML = "";
@@ -364,5 +367,27 @@ describe("createReplayCaptureSession", () => {
     expect(() => session.start()).not.toThrow();
     expect(session.getState()).toMatchObject({ status: "blocked", reason: "policy_disabled" });
     expect(() => window.history.pushState({}, "", "/other")).not.toThrow();
+  });
+
+  it("restarts a boundary with fresh Meta and FullSnapshot only while still permitted", () => {
+    const fake = fakeRecord();
+    const { session, buffer, setPolicy } = setup({ record: fake.record });
+    dispose = session.dispose;
+    epicReplayConsent.grant();
+    session.start();
+
+    session.restartBoundary();
+
+    expect(fake.stop).toHaveBeenCalledTimes(1);
+    expect(session.getState()).toMatchObject({ status: "capturing", boundary: 2 });
+    expect(buffer.events().filter((entry) => entry.boundary === 2).map((entry) => entry.event.type)).toEqual([
+      EventType.Meta,
+      EventType.FullSnapshot,
+    ]);
+
+    setPolicy(disabledReplayConfig({ reason: "not_configured", environment: null, release: null, now: 0 }), false);
+    session.restartBoundary();
+    expect(session.getState()).toMatchObject({ status: "blocked", boundary: 2 });
+    expect(fake.record).toHaveBeenCalledTimes(2);
   });
 });

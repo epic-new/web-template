@@ -112,6 +112,7 @@ export const styleguideNavigation: NavItem[] = [
     href: '/styleguide/replay',
     items: [
       { title: 'Replay Privacy', href: '/styleguide/replay', description: 'Development harness for replay consent, masking and route exclusion' },
+      { title: 'Replay Upload', href: '/styleguide/replay/upload', description: 'Development harness for recording registration and bounded batch upload' },
     ],
   },
 ]

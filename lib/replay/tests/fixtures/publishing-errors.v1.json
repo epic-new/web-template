@@ -1,0 +1,35 @@
+{
+  "description": "Synthetic EPI-210 v1 publishing error conformance cases. Not Epic, not rrweb: fixture conformance is not live provider evidence.",
+  "valid": [
+    { "status": 401, "body": { "contractVersion": 1, "error": "The publishing credential was rejected", "code": "REPLAY_CREDENTIAL_INVALID" }, "retryAfter": null, "action": "stop" },
+    { "status": 401, "body": { "contractVersion": 1, "error": "The upload capability expired", "code": "capability_expired" }, "retryAfter": null, "action": "renew" },
+    { "status": 401, "body": { "contractVersion": 1, "error": "The upload capability is not valid", "code": "invalid_capability" }, "retryAfter": null, "action": "restart" },
+    { "status": 403, "body": { "contractVersion": 1, "error": "The recording belongs to another subject", "code": "subject_mismatch" }, "retryAfter": null, "action": "restart" },
+    { "status": 403, "body": { "contractVersion": 1, "error": "Capture is disabled", "code": "capture_disabled" }, "retryAfter": null, "action": "stop" },
+    { "status": 403, "body": { "contractVersion": 1, "error": "Reporting is disabled", "code": "reporting_disabled" }, "retryAfter": null, "action": "stop" },
+    { "status": 404, "body": { "contractVersion": 1, "error": "Recording not found", "code": "recording_not_found" }, "retryAfter": null, "action": "restart" },
+    { "status": 409, "body": { "contractVersion": 1, "error": "The idempotency key was used with different content", "code": "idempotency_conflict" }, "retryAfter": null, "action": "stop" },
+    { "status": 409, "body": { "contractVersion": 1, "error": "The batch is out of order", "code": "out_of_order", "expectedSequence": 3 }, "retryAfter": null, "action": "restart" },
+    { "status": 409, "body": { "contractVersion": 1, "error": "An upload for this recording is in progress", "code": "upload_in_progress", "retryAfterMs": 1500 }, "retryAfter": "2", "action": "retry" },
+    { "status": 409, "body": { "contractVersion": 1, "error": "The recording is closed", "code": "recording_closed" }, "retryAfter": null, "action": "restart" },
+    { "status": 409, "body": { "contractVersion": 1, "error": "Delivery of this batch is uncertain", "code": "delivery_uncertain" }, "retryAfter": null, "action": "quarantine" },
+    { "status": 413, "body": { "contractVersion": 1, "error": "The request is too large", "code": "payload_too_large" }, "retryAfter": null, "action": "stop" },
+    { "status": 422, "body": { "contractVersion": 1, "error": "The request is not valid", "code": "invalid_request" }, "retryAfter": null, "action": "stop" },
+    { "status": 422, "body": { "contractVersion": 1, "error": "The evidence is not valid", "code": "invalid_evidence" }, "retryAfter": null, "action": "stop" },
+    { "status": 429, "body": { "contractVersion": 1, "error": "Too many requests", "code": "rate_limited", "retryAfterMs": 1000 }, "retryAfter": "1", "action": "retry" },
+    { "status": 503, "body": { "contractVersion": 1, "error": "Replay ingestion is unavailable", "code": "unavailable" }, "retryAfter": null, "action": "retry" },
+    { "status": 503, "body": { "contractVersion": 1, "error": "Replay ingestion is unavailable", "code": "unavailable", "retryAfterMs": 2001 }, "retryAfter": "3", "action": "retry" }
+  ],
+  "invalid": [
+    { "reason": "lowercased credential code", "status": 401, "body": { "contractVersion": 1, "error": "x", "code": "replay_credential_invalid" } },
+    { "reason": "generic unauthorized substituted", "status": 401, "body": { "contractVersion": 1, "error": "x", "code": "unauthorized" } },
+    { "reason": "nested error object", "status": 409, "body": { "contractVersion": 1, "error": { "code": "delivery_uncertain" } } },
+    { "reason": "out_of_order without expectedSequence", "status": 409, "body": { "contractVersion": 1, "error": "x", "code": "out_of_order" } },
+    { "reason": "upload_in_progress without retryAfterMs", "status": 409, "body": { "contractVersion": 1, "error": "x", "code": "upload_in_progress" } },
+    { "reason": "rate_limited without retryAfterMs", "status": 429, "body": { "contractVersion": 1, "error": "x", "code": "rate_limited" } },
+    { "reason": "retryAfterMs in seconds-like zero", "status": 429, "body": { "contractVersion": 1, "error": "x", "code": "rate_limited", "retryAfterMs": 0 } },
+    { "reason": "status does not match code", "status": 500, "body": { "contractVersion": 1, "error": "x", "code": "delivery_uncertain" } },
+    { "reason": "unknown extra field", "status": 404, "body": { "contractVersion": 1, "error": "x", "code": "recording_not_found", "subjectId": "sub_x" } },
+    { "reason": "wrong contract version", "status": 404, "body": { "contractVersion": 2, "error": "x", "code": "recording_not_found" } }
+  ]
+}
