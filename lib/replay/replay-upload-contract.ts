@@ -165,7 +165,7 @@ export const REPLAY_ROUTE_MAX = 512;
 const routeSchema = z
   .string()
   .max(REPLAY_ROUTE_MAX)
-  .regex(/^\/(?!\/)[^?#\u0000-\u001f\u007f]*$/, "Expected a pathname");
+  .regex(/^\/(?!\/)[^?#\u0000-\u001f\u007f\s`<>[\]{}"\\^|]*$/, "Expected a pathname");
 
 export const REPLAY_RELEASE_PATTERN = /^[A-Za-z0-9._+\-/]{1,128}$/;
 export const releaseSchema = z.string().regex(REPLAY_RELEASE_PATTERN).nullable();
@@ -280,7 +280,7 @@ export const replayReportRequestSchema = z
     route: z
       .string()
       .max(REPLAY_REPORT_ROUTE_MAX)
-      .regex(/^\/(?!\/)[^?#\u0000-\u001f\u007f]*$/, "Expected a pathname"),
+      .regex(/^\/(?!\/)[^?#\u0000-\u001f\u007f\s`<>[\]{}"\\^|]*$/, "Expected a pathname"),
     release: releaseSchema,
     evidence: replayReportEvidenceSchema.nullable(),
     description: reportTextSchema.transform((value) => value.trim()).pipe(z.string().min(1)),
@@ -309,8 +309,12 @@ export const replayReportResponseSchema = z
   .strict();
 export type ReplayReportResponse = z.infer<typeof replayReportResponseSchema>;
 
-/** Strips the query and fragment: only a pathname is ever reported. */
+/**
+ * Strips the query and fragment: only a pathname is ever reported. Characters
+ * a browser would have percent-encoded are encoded here too, since Epic
+ * refuses them raw (they would break out of the markdown it quotes routes in).
+ */
 export function toReplayPathname(input: string): string | null {
-  const path = input.split(/[?#]/, 1)[0] ?? "";
+  const path = (input.split(/[?#]/, 1)[0] ?? "").replace(/[\s`<>[\]{}"\\^|]/g, (char) => encodeURIComponent(char));
   return /^\/(?!\/)[^\u0000-\u001f\u007f]*$/.test(path) ? path : null;
 }

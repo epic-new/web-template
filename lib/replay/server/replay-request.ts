@@ -1,5 +1,6 @@
 import "server-only";
 
+import { replaySecret } from "@/lib/replay/server/replay-subject";
 import type { NextRequest } from "next/server";
 
 import { getUser } from "@/lib/auth";
@@ -111,7 +112,7 @@ export async function resolveReplayUser(): Promise<{ userId: string } | null> {
 
 /** The acknowledged visitor of a correctly signed cookie; never mints one. */
 export function resolveReplayVisitor(request: NextRequest): string | null {
-  const secret = process.env.BETTER_AUTH_SECRET;
+  const secret = replaySecret();
   if (!secret) return null;
   return verifyReplayVisitorCookie(request.cookies.get(REPLAY_VISITOR_COOKIE)?.value, secret);
 }

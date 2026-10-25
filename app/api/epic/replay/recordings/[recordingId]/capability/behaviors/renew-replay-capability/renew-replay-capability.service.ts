@@ -6,7 +6,7 @@ import {
 } from "@/lib/replay/replay-upload-contract";
 import { relayFailure } from "@/lib/replay/server/relay-failure";
 import { ReplayUploadError } from "@/lib/replay/server/replay-upload-error";
-import { deriveReplaySubject, type ReplayActor } from "@/lib/replay/server/replay-subject";
+import { deriveReplaySubject, type ReplayActor, replaySecret } from "@/lib/replay/server/replay-subject";
 import { EpicClient } from "@/shared/integrations/epic/epic";
 import { RecordingsResource } from "@/shared/integrations/epic/resources/recordings.resource";
 import { ReplayRecordingModel } from "@/shared/models/replay-recording";
@@ -33,7 +33,7 @@ export class RenewReplayCapability {
       if (!command.actor) throw new ReplayUploadError("identity_required");
 
       const client = EpicClient.fromEnv();
-      const secret = process.env.BETTER_AUTH_SECRET;
+      const secret = replaySecret();
       if (!client || !secret) throw new ReplayUploadError("not_configured");
 
       const subjectId = deriveReplaySubject(command.actor, secret);

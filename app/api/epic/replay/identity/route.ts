@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 
+import { replaySecret } from "@/lib/replay/server/replay-subject";
 import { REPLAY_IDENTITY_MAX_BYTES, REPLAY_UPLOAD_CONTRACT_VERSION } from "@/lib/replay/replay-upload-contract";
 import {
   assertSameOrigin,
@@ -34,10 +35,11 @@ export async function POST(request: NextRequest) {
     const { mintVisitor } = await AcknowledgeReplayIdentity.execute({
       user: await resolveReplayUser(),
       visitorId: resolveReplayVisitor(request),
+      clientAddress: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip"),
       input,
     });
 
-    const secret = process.env.BETTER_AUTH_SECRET!;
+    const secret = replaySecret()!;
     return replayJson(
       ACK,
       200,

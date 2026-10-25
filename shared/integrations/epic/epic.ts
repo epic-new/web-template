@@ -100,6 +100,8 @@ export class EpicClient {
           Accept: "application/json",
         },
         cache: "no-store",
+        // The bearer token must never follow a redirect to another host.
+        redirect: "error",
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
     } catch {
