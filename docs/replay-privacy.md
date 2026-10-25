@@ -261,6 +261,11 @@ Three automatic recovery rotations is the maximum (policy may lower it).
 Registration and the initial snapshot alone do not replenish that budget;
 healthy capture must last at least 30 seconds with three acknowledged non-final
 batches including post-opening activity, or the host must explicitly restart.
+Pausing capture, including during identity revalidation, or going offline restarts
+the healthy progress interval while preserving accumulated recovery debt. Only
+new batch acknowledgments advance progress. Remounts, ordinary
+policy refreshes, route reentry and repeated consent grants also retain that debt
+and any terminal failure reason.
 
 ## Cooperative clean reload handoff
 

@@ -15,7 +15,7 @@ import { createReplayVerificationRelay, SYNTHETIC_RELAY_PROJECT, SYNTHETIC_RELAY
 import { createReplayRootRuntime } from "../replay-root-runtime";
 import { createReplayRecordingPipeline } from "../replay-recording-pipeline";
 import { createReplayDocumentOwners } from "../replay-document-owner";
-import { createReplayHandoff, type ReplayHandoffLedgerRecord, type ReplayHandoffLedger } from "../replay-handoff";
+import { createReplayHandoff, REPLAY_HANDOFF_STORAGE_KEY, type ReplayHandoffLedgerRecord, type ReplayHandoffLedger } from "../replay-handoff";
 import { epicReplayConsent } from "../replay-consent";
 import type { ReplayLockManager } from "../replay-ownership";
 import type { ReplayFetch } from "../replay-upload-contract";
@@ -58,6 +58,7 @@ describe("root runtime through real BFF and document-independent synthetic relay
       if (!match) throw new Error("Unexpected synthetic browser request");
       return match[2] === "batches" ? upload(request, routeParams(match[1]!)) : renew(request, routeParams(match[1]!));
     };
+    const browserFetch = vi.fn(browser);
     const held = new Set<string>();
     const locks: ReplayLockManager = { async request(name, _options, callback) {
       if (held.has(name)) throw new Error("Contended synthetic browser lock");
@@ -76,7 +77,7 @@ describe("root runtime through real BFF and document-independent synthetic relay
     }) as typeof rrwebRecord;
     const create = (type: "reload" | "navigate", opener = false) => {
       const runtime = createReplayRootRuntime({ documentRelease: "synthetic-build-A", getPolicy: () => policy,
-        subscribePolicy: () => () => {}, fetch: browser, pipelineOptions: { record },
+        subscribePolicy: () => () => {}, fetch: browserFetch, pipelineOptions: { record },
         loadPipeline: async () => ({ createReplayRecordingPipeline }), owners: createReplayDocumentOwners(), locks,
         monotonicNow: Date.now, handoff: createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: Date.now, epochNow: Date.now }),
         navigation: { type, opener },
@@ -88,7 +89,7 @@ describe("root runtime through real BFF and document-independent synthetic relay
     const control = (mode: string) => central("http://localhost:4319/__synthetic/control", { method: "POST", headers: {
       authorization: `Bearer ${SYNTHETIC_RELAY_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ mode }) });
     vi.useFakeTimers({ now: Date.now(), toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
-    return { create, inspect, control };
+    return { create, inspect, control, browserFetch };
   }
   async function capture(runtime: ReturnType<typeof createReplayRootRuntime>, timeout = 11_000) {
     await vi.waitFor(() => expect(runtime.getSnapshot().snapshotReceived, JSON.stringify(runtime.getSnapshot())).toBe(true), { timeout, interval: 100 });
@@ -133,5 +134,80 @@ describe("root runtime through real BFF and document-independent synthetic relay
         sequence: 1, types: [4, 2], status: 409, code: "recording_closed", final: false }));
       expect(state.recordings).toContainEqual(expect.objectContaining({ recordingId: reference.recordingId, status: "closed", nextSequence: 1 }));
     }
+  }, 30_000);
+
+  it("spends a lost resume registration once and rejects replay of its consumed candidate through the real BFF", async () => {
+    const { create, inspect, control, browserFetch } = await setup();
+    const original = create("navigate"); await capture(original);
+    const reference = original.getSnapshot().reference!;
+    const originalIntent = browserFetch.mock.calls.find(([path]) => String(path).endsWith("/recordings"))![1]!.body;
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    const savedCandidate = sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)!;
+    expect(savedCandidate).not.toBeNull();
+    original.dispose(); epicReplayConsent.reset();
+    await control("lose_next_registration");
+
+    const successor = create("reload");
+    const continuity: string[] = [];
+    successor.subscribe(() => continuity.push(successor.getSnapshot().continuity));
+    await capture(successor, 20_000);
+    expect(successor.getSnapshot()).toMatchObject({ continuity: "new_recording" });
+    expect(successor.getSnapshot().reference!.recordingId).not.toBe(reference.recordingId);
+    expect(successor.getDiagnostics().recoveryDebt).toBe(1);
+    expect(continuity).not.toContain("resumed");
+    expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
+
+    // A copied carrier cannot revive the already-consumed shared generation,
+    // even while its original acceptance window is still open.
+    sessionStorage.setItem(REPLAY_HANDOFF_STORAGE_KEY, savedCandidate);
+    const clone = create("reload"); await capture(clone, 20_000);
+    expect(clone.getSnapshot()).toMatchObject({ continuity: "new_recording" });
+    expect(clone.getSnapshot().reference!.recordingId).not.toBe(reference.recordingId);
+    const originalAttempts = browserFetch.mock.calls.filter(([path, init]) =>
+      String(path).endsWith("/recordings") && init?.body === originalIntent);
+    expect(originalAttempts).toHaveLength(2); // Initial registration and one lost resume ACK.
+    const state = await inspect();
+    expect(state.recordings).toHaveLength(3);
+    expect(state.recordings).toContainEqual(expect.objectContaining({ recordingId: reference.recordingId, status: "open", nextSequence: 1 }));
+    expect(state.calls.filter((call: { recordingId: string }) => call.recordingId === reference.recordingId)).toHaveLength(1);
+    await PostDB(db, schema, { replay_recording: [{ status: "open" }, { status: "open" }, { status: "open" }] });
+  }, 30_000);
+
+  it("recovers a lost first resumed snapshot ACK with the exact immutable batch through the real BFF", async () => {
+    const { create, inspect, control, browserFetch } = await setup();
+    const original = create("navigate"); await capture(original);
+    const reference = original.getSnapshot().reference!;
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    original.dispose(); epicReplayConsent.reset();
+    await control("lose_next_receipt");
+
+    const successor = create("reload");
+    await vi.waitFor(async () => {
+      const state = await inspect();
+      expect(state.calls).toContainEqual(expect.objectContaining({ recordingId: reference.recordingId,
+        sequence: 1, types: [4, 2], status: "lost_receipt", final: false }));
+    }, { timeout: 11_000, interval: 50 });
+    expect(successor.getSnapshot()).toMatchObject({ continuity: "resuming", snapshotReceived: false,
+      reference: { recordingId: reference.recordingId, startedAt: reference.startedAt } });
+    expect(successor.getDiagnostics().eligibleHandoff).toBe(false);
+    expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
+
+    await capture(successor);
+    expect(successor.getSnapshot()).toMatchObject({ continuity: "resumed", snapshotReceived: true,
+      reference: { recordingId: reference.recordingId, startedAt: reference.startedAt } });
+    expect(successor.getDiagnostics().recoveryDebt).toBe(0);
+    const resumedRequests = browserFetch.mock.calls.filter(([path, init]) =>
+      String(path).endsWith(`/recordings/${reference.recordingId}/batches`) && JSON.parse(String(init?.body)).sequence === 1);
+    expect(resumedRequests).toHaveLength(2);
+    expect(resumedRequests[1]![1]!.body).toBe(resumedRequests[0]![1]!.body);
+    const state = await inspect();
+    expect(state.recordings).toHaveLength(1);
+    expect(state.recordings[0]).toMatchObject({ recordingId: reference.recordingId, nextSequence: 2, status: "open" });
+    expect(state.calls).toMatchObject([
+      { sequence: 0, status: 200 },
+      { sequence: 1, types: [4, 2], status: "lost_receipt", final: false },
+      { sequence: 1, types: [4, 2], status: 200, final: false },
+    ]);
+    await PostDB(db, schema, { replay_recording: [{ status: "open" }] });
   }, 30_000);
 });

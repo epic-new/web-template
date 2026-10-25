@@ -26,6 +26,19 @@ describe("root lifecycle policy", () => {
     expect(budget.debt).toBe(0);
   });
 
+  it("retains debt and requires fresh healthy progress after capture is interrupted", () => {
+    const budget = createReplayRecoveryBudget(1);
+    budget.acknowledged("recording", 1, 0, 0);
+    budget.acknowledged("recording", 3, 2, 20_000);
+    budget.interrupt();
+    expect(budget.debt).toBe(1);
+    budget.acknowledged("recording", 4, 3, 60_000);
+    budget.acknowledged("recording", 5, 4, 89_999);
+    expect(budget.debt).toBe(1);
+    budget.acknowledged("recording", 6, 5, 90_000);
+    expect(budget.debt).toBe(0);
+  });
+
   it("stops a previous recorder before a harness takes ownership and prevents a competing root", () => {
     const owners = createReplayDocumentOwners();
     const events: string[] = [];

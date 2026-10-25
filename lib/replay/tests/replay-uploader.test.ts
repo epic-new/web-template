@@ -859,6 +859,43 @@ describe("createReplayUploader", () => {
     original.uploader.dispose();
   });
 
+  it("bounds repeated lost resumed snapshot receipts without changing the batch or claiming continuity", async () => {
+    const original = setup();
+    original.uploader.push(meta(), 1);
+    original.uploader.push(full(), 1);
+    await flush(5_000);
+    const checkpoint = original.uploader.quiesceForHandoff()!;
+    expect(original.uploader.commitHandoff()).toBe(true);
+    const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const response = await original.browser.fetch(url, init);
+      if (String(url).endsWith("/batches")) throw new TypeError("accepted resumed snapshot receipt lost");
+      return response;
+    });
+    const successor = setup({ fetch });
+    const resumed = successor.uploader.resumeFromCheckpoint(checkpoint);
+    await flush(0);
+    expect(await resumed).toBe(true);
+    successor.uploader.push(meta(Date.now()), 1);
+    successor.uploader.push(full(Date.now() + 1), 1);
+    await flush(6_500);
+    expect(successor.uploader.getState()).toMatchObject({ status: "unavailable", reason: "attempts_exhausted",
+      current: null, bufferedEvents: 0, bufferedBytes: 0,
+      history: [expect.objectContaining({ outcome: "incomplete", reason: "attempts_exhausted", acceptedBatches: 1 })] });
+    expect(successor.uploader.getProgress()).toMatchObject({ continuity: "resuming", snapshotReceived: false });
+    expect(successor.uploader.getCheckpoint()).toBeNull();
+    expect(successor.lost).not.toHaveBeenCalled();
+    const attempts = fetch.mock.calls.filter(([url]) => String(url).endsWith("/batches"));
+    expect(attempts).toHaveLength(REPLAY_RECORDING_LIMITS.maxAttempts);
+    expect(new Set(attempts.map(([, init]) => init!.body)).size).toBe(1);
+    expect(JSON.parse(String(attempts[0]![1]!.body))).toMatchObject({ sequence: checkpoint.nextSequence, final: false });
+    expect(original.fixture.recordings()).toEqual([expect.objectContaining({ recordingId: checkpoint.recordingId,
+      status: "open", nextSequence: checkpoint.nextSequence + 1 })]);
+    await flush(30_000);
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/batches"))).toHaveLength(REPLAY_RECORDING_LIMITS.maxAttempts);
+    expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/recordings"))).toHaveLength(1);
+    successor.uploader.dispose(); original.uploader.dispose();
+  });
+
   it("bounds and cancels resume identity work without admitting recorder events", async () => {
     const original = setup();
     original.uploader.push(meta(), 1);

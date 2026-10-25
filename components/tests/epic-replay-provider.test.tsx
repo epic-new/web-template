@@ -239,6 +239,22 @@ describe("EpicReplayProvider and public hook", () => {
     expect(fixture.value.setIdentity).toHaveBeenLastCalledWith("user-3");
   });
 
+  it("cannot restore a pending auth refresh after the observed session fails", async () => {
+    const fixture = fakeRuntime();
+    boundary.createRuntime.mockReturnValue(fixture.runtime);
+    let settle!: (result: { data: { user: { id: string } }; error: null }) => void;
+    boundary.getSession.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    const view = render(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    await waitFor(() => expect(fixture.attached()).toBe(1));
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    boundary.session = { ...boundary.session, error: new Error("Session unavailable") };
+    view.rerender(<EpicReplayProvider documentRelease="build-a"><Readout /></EpicReplayProvider>);
+    expect(fixture.value.failIdentityRevalidation).toHaveBeenCalledOnce();
+    await act(async () => { settle({ data: { user: { id: "user-1" } }, error: null }); });
+    // Only the initial resolved identity was admitted, before the failure.
+    expect(fixture.value.setIdentity).toHaveBeenCalledTimes(1);
+  });
+
   it("revalidates auth on suspension clock gates even without focus or visibility events", async () => {
     const fixture = fakeRuntime();
     boundary.createRuntime.mockReturnValue(fixture.runtime);

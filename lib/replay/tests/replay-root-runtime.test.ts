@@ -111,6 +111,51 @@ describe("one root replay lifecycle", () => {
     expect(loadPipeline).not.toHaveBeenCalled();
   });
 
+  it.each(["withdrawal", "route", "policy", "expiry", "identity", "detach", "harness"] as const)("revokes a pending pipeline import before %s can admit a recording", async (change) => {
+    let resolveImport!: (value: { createReplayRecordingPipeline: typeof createReplayRecordingPipeline }) => void;
+    const loadPipeline = vi.fn(() => new Promise<{ createReplayRecordingPipeline: typeof createReplayRecordingPipeline }>((resolve) => { resolveImport = resolve; }));
+    let policy = activeReplayPolicy();
+    const changes = new Set<() => void>();
+    const owners = createReplayDocumentOwners();
+    const { runtime, browser, fake } = setup({ loadPipeline, owners, getPolicy: () => policy,
+      subscribePolicy: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; } });
+    runtime.setIdentity("user-1"); const detach = runtime.attach(); epicReplayConsent.grant(); await flush();
+    expect(loadPipeline).toHaveBeenCalledTimes(1);
+    expect(fake.record).not.toHaveBeenCalled();
+    if (change === "withdrawal") epicReplayConsent.withdraw();
+    if (change === "route") window.history.pushState({}, "", "/excluded");
+    if (change === "policy" || change === "expiry") {
+      policy = disabledReplayConfig({ reason: change === "expiry" ? "expired" : "unavailable", environment: "development", release: null, now: Date.now() });
+      for (const notify of changes) notify();
+    }
+    if (change === "identity") runtime.beginIdentityChange();
+    if (change === "detach") detach();
+    const releaseHarness = change === "harness" ? owners.acquire("harness", () => {}) : null;
+    resolveImport({ createReplayRecordingPipeline });
+    await flush(5_100);
+    expect(fake.record).not.toHaveBeenCalled();
+    expect(browser.log.filter((entry) => entry.path === "/recordings" || entry.path.endsWith("/batches"))).toEqual([]);
+    expect(runtime.getSnapshot().reference).toBeNull();
+    runtime.dispose();
+    releaseHarness?.();
+  });
+
+  it("does not let an obsolete pipeline import borrow a new consent generation", async () => {
+    const imports: ((value: { createReplayRecordingPipeline: typeof createReplayRecordingPipeline }) => void)[] = [];
+    const loadPipeline = vi.fn(() => new Promise<{ createReplayRecordingPipeline: typeof createReplayRecordingPipeline }>((resolve) => { imports.push(resolve); }));
+    const { runtime, fake, browser } = setup({ loadPipeline });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush();
+    epicReplayConsent.withdraw(); epicReplayConsent.grant(); await flush();
+    expect(imports).toHaveLength(2);
+    imports[0]!({ createReplayRecordingPipeline }); await flush();
+    expect(fake.record).not.toHaveBeenCalled();
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toEqual([]);
+    imports[1]!({ createReplayRecordingPipeline }); await flush(5_100);
+    expect(fake.record).toHaveBeenCalledTimes(1);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", snapshotReceived: true });
+  });
+
   it("keeps the shared recovery budget when every new recording fails after its initial batch", async () => {
     const fixture = createSyntheticEpi210();
     const browser = createSyntheticBrowserFetch(fixture);
@@ -152,6 +197,53 @@ describe("one root replay lifecycle", () => {
     expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", snapshotReceived: true });
     expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
     expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(count + 1);
+  });
+
+  it("preserves exhausted recovery and terminal history through remount, policy refresh, route reentry and regrant until explicit restart", async () => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    let policy = activeReplayPolicy();
+    const changes = new Set<() => void>();
+    const { runtime, fake } = setup({ fetch: browser.fetch, getPolicy: () => policy,
+      subscribePolicy: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; } });
+    runtime.setIdentity("user-1"); const detach = runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    for (let i = 0; i < 4; i++) { fixture.setMode("delivery_uncertain_next"); fake.event(); await flush(10_100); }
+    expect(runtime.getSnapshot()).toMatchObject({ status: "unavailable", reason: "delivery_uncertain" });
+    const history = runtime.getDiagnostics().pipeline!.upload.history;
+    const registrations = browser.log.filter((entry) => entry.path === "/recordings").length;
+    detach(); runtime.attach();
+    policy = { ...policy, fetchedAt: Date.now(), expiresAt: Date.now() + 60_000 };
+    for (const notify of changes) notify();
+    window.history.pushState({}, "", "/excluded");
+    window.history.pushState({}, "", "/styleguide/replay/upload");
+    epicReplayConsent.withdraw(); epicReplayConsent.grant();
+    runtime.start(); await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "unavailable", reason: "delivery_uncertain", reference: null });
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(3);
+    expect(runtime.getDiagnostics().pipeline!.upload.history).toEqual(history);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(registrations);
+    runtime.restart(); await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", snapshotReceived: true, continuity: "new_recording" });
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(registrations + 1);
+  });
+
+  it.each(["revalidation", "explicit_boundary"] as const)("keeps exhausted terminal state through pending %s, remount and the same resolved user", async (boundary) => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    const { runtime, fake } = setup({ fetch: browser.fetch });
+    runtime.setIdentity("user-1"); const detach = runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    for (let i = 0; i < 4; i++) { fixture.setMode("delivery_uncertain_next"); fake.event(); await flush(10_100); }
+    const history = runtime.getDiagnostics().pipeline!.upload.history;
+    const registrations = browser.log.filter((entry) => entry.path === "/recordings").length;
+    if (boundary === "revalidation") runtime.beginIdentityRevalidation();
+    else runtime.beginIdentityChange();
+    detach(); runtime.attach(); await flush(2_000);
+    runtime.setIdentity("user-1"); await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "unavailable", reason: "delivery_uncertain", reference: null });
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(3);
+    expect(runtime.getDiagnostics().pipeline!.upload.history).toEqual(history);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(registrations);
   });
 
   it("stops at inactivity and starts a fresh boundary only after user activity", async () => {
@@ -314,6 +406,70 @@ describe("one root replay lifecycle", () => {
     expect(successor.getSnapshot()).toMatchObject({ reference: { recordingId: reference.recordingId, startedAt: reference.startedAt }, continuity: "resumed", snapshotReceived: true });
     expect(browser.log.filter((entry) => entry.path.endsWith("/batches")).every((entry) => !entry.final)).toBe(true);
     expect(sessionStorage.getItem(REPLAY_HANDOFF_STORAGE_KEY)).toBeNull();
+  });
+
+  it("carries recovery debt through an acknowledged clean reload until meaningful healthy progress", async () => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    const { locks, ledger } = ownershipFixture();
+    const handoff = () => createReplayHandoff({ storage: sessionStorage, ledger, now: Date.now, monotonicNow: Date.now, epochNow: Date.now });
+    const { runtime: original, fake: originalRecorder } = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "navigate", opener: false } });
+    original.setIdentity("user-1"); original.attach(); epicReplayConsent.grant(); await flush(5_100);
+    fixture.setMode("delivery_uncertain_next"); originalRecorder.event(); await flush(10_100);
+    expect(original.getDiagnostics()).toMatchObject({ recoveryDebt: 1, eligibleHandoff: true });
+    const reference = original.getSnapshot().reference!;
+    window.dispatchEvent(new PageTransitionEvent("pagehide")); original.dispose(); epicReplayConsent.reset();
+    const { runtime: successor, fake } = setup({ fetch: browser.fetch, locks, handoff: handoff(), navigation: { type: "reload", opener: false } });
+    successor.setIdentity("user-1"); successor.attach(); epicReplayConsent.grant(); await flush(5_100);
+    expect(successor.getSnapshot()).toMatchObject({ reference: { recordingId: reference.recordingId, startedAt: reference.startedAt }, continuity: "resumed", snapshotReceived: true });
+    expect(successor.getDiagnostics().recoveryDebt).toBe(1);
+    fake.event(); await flush(5_100);
+    fake.event(); await flush(5_100);
+    expect(successor.getDiagnostics().recoveryDebt).toBe(1); // Three ACKs alone do not replenish debt.
+    await flush(25_000);
+    fake.event(); await flush(5_100);
+    expect(successor.getDiagnostics().recoveryDebt).toBe(0);
+  });
+
+  it("does not count paused identity revalidation as healthy capture that replenishes recovery", async () => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    const { runtime, fake } = setup({ fetch: browser.fetch });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    fixture.setMode("delivery_uncertain_next"); fake.event(); await flush(10_100);
+    fake.event(); await flush(5_100);
+    fake.event(); await flush(5_100);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(1);
+    const reference = runtime.getSnapshot().reference!;
+    runtime.beginIdentityRevalidation(); await flush(11_000);
+    runtime.setIdentity("user-1"); await flush(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ reference: { recordingId: reference.recordingId, startedAt: reference.startedAt }, continuity: "resumed", snapshotReceived: true });
+    fake.event(); await flush(5_100);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(1);
+    await flush(30_000);
+    fake.event(); await flush(5_100);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
+  });
+
+  it("does not replenish recovery on offline ticks after three acknowledged batches", async () => {
+    const fixture = createSyntheticEpi210();
+    const browser = createSyntheticBrowserFetch(fixture);
+    const fake = recorder();
+    let online = true;
+    const { runtime } = setup({ fetch: browser.fetch, pipelineOptions: { record: fake.record, isOnline: () => online } });
+    runtime.setIdentity("user-1"); runtime.attach(); epicReplayConsent.grant(); await flush(5_100);
+    fixture.setMode("delivery_uncertain_next"); fake.event(); await flush(10_100);
+    fake.event(); await flush(5_100);
+    fake.event(); await flush(5_100);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(1);
+    online = false; fake.event(); await flush(16_000);
+    expect(runtime.getDiagnostics().pipeline!.upload.reason).toBe("offline");
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(1);
+    online = true; await flush(5_100);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(1);
+    await flush(30_000);
+    fake.event(); await flush(5_100);
+    expect(runtime.getDiagnostics().recoveryDebt).toBe(0);
   });
 
   it("preserves an offered reload checkpoint through delayed same-subject auth revalidation", async () => {

@@ -103,7 +103,16 @@ export function useInitializeEpicReplay(options: Pick<ReplayRootOptions, "docume
     identity.current = key;
     const host = hostRef.current;
     if (!host) return;
-    if (session.error) { host.runtime?.failIdentityRevalidation(); return; }
+    if (session.error) {
+      // The manager may still be importing. Revoke the host's cached identity
+      // too, and prevent an older refresh from restoring it after this failure.
+      host.refreshEpoch++;
+      host.refreshController?.abort();
+      host.pendingIdentity = false;
+      host.identity = undefined;
+      host.runtime?.failIdentityRevalidation();
+      return;
+    }
     if (host.pendingIdentity) {
       // An observed account switch supersedes an older refresh. An explicit
       // auth operation must settle through its barrier before any identity wins.

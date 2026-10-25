@@ -37,6 +37,7 @@ export interface ReplayRecoveryBudget {
   debt: number;
   take(limit: number): boolean;
   acknowledged(recordingId: string, acceptedBatches: number, postOpeningBatches: number, now: number): void;
+  interrupt(): void;
   reset(): void;
 }
 
@@ -54,6 +55,9 @@ export function createReplayRecoveryBudget(initialDebt = 0): ReplayRecoveryBudge
       if (!healthy || healthy.id !== id) healthy = { id, since: now };
       if (accepted >= 3 && postOpening > 0 && now - healthy.since >= 30_000) this.reset();
     },
+    // Retain recovery debt across pauses, but never count unresolved identity
+    // or detached capture toward a healthy recording's progress threshold.
+    interrupt() { healthy = null; },
     reset() { this.debt = 0; healthy = null; },
   };
 }

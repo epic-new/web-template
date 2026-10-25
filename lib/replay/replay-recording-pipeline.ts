@@ -63,6 +63,7 @@ export function createReplayRecordingPipeline({
   let pagehideAttached = false;
   let started = false;
   let captureFailureHandled = false;
+  let lastAcknowledged: { recordingId: string; acceptedBatches: number } | null = null;
 
   const uploader = createReplayUploader({
     ...uploaderOptions,
@@ -102,6 +103,7 @@ export function createReplayRecordingPipeline({
     for (const listener of [...listeners]) listener();
   }
   session.subscribe(() => {
+    if (session.getState().status !== "capturing") recoveryBudget.interrupt();
     if (session.hasFailed() && !captureFailureHandled) {
       captureFailureHandled = true;
       started = false;
@@ -115,7 +117,12 @@ export function createReplayRecordingPipeline({
   uploader.subscribe(() => {
     const progress = uploader.getProgress();
     const reference = uploader.getRecordingReference();
-    if (reference) recoveryBudget.acknowledged(reference.recordingId, progress.acceptedBatches, progress.postOpeningBatches, uploaderOptions.monotonicNow?.() ?? performance.now());
+    if (uploader.getState().reason === "offline") recoveryBudget.interrupt();
+    else if (reference && session.getState().status === "capturing" && progress.acceptedBatches > 0 &&
+      (lastAcknowledged?.recordingId !== reference.recordingId || lastAcknowledged.acceptedBatches !== progress.acceptedBatches)) {
+      lastAcknowledged = { recordingId: reference.recordingId, acceptedBatches: progress.acceptedBatches };
+      recoveryBudget.acknowledged(reference.recordingId, progress.acceptedBatches, progress.postOpeningBatches, uploaderOptions.monotonicNow?.() ?? performance.now());
+    }
     if (uploader.getState().status === "unavailable" && restartTimer === undefined) {
       started = false;
       // The upload outcome/history remains visible; stopping rrweb must not

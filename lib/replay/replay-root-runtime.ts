@@ -178,7 +178,9 @@ export function createReplayRootRuntime({
       if (continuity === "resumed") resumeCandidate = null;
     }
     publish({ status: exhausted ? "unavailable" : pipeline.isRecovering() ? "waiting" : current.capture.status === "capturing" ? "capturing" : "waiting",
-      reason: pipeline.hasCaptureFailure() ? "recorder_unavailable" : exhausted ? current.upload.reason : current.capture.reason,
+      // Dropping unsent data on detach/revocation clears the transport's active
+      // state; it must not erase the terminal outcome of the exhausted owner.
+      reason: pipeline.hasCaptureFailure() ? "recorder_unavailable" : exhausted ? current.upload.reason ?? state.reason : current.capture.reason,
       reference: current.upload.current, snapshotReceived: progress.snapshotReceived, continuity });
     diagnosticsChanged();
     const checkpoint = pipeline.getCheckpoint();
@@ -464,7 +466,7 @@ export function createReplayRootRuntime({
     } else if (pipeline) {
       pipeline.stop(); invalidateHandoff(); continuity = "new_recording";
     }
-    publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false });
+    if (!exhausted) publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false });
   }
   return {
     attach() { attached++; if (attached === 1) install(); reconcile(); return () => { attached = Math.max(0, attached - 1); if (!attached) { cancel(); if (!(suspended && continuity === "handoff")) invalidateHandoff(); for (const cleanup of cleanups.splice(0).reverse()) cleanup(); releaseOwner?.(); releaseOwner = null; } }; },
@@ -481,7 +483,7 @@ export function createReplayRootRuntime({
     },
     beginIdentityRevalidation,
     failIdentityRevalidation() { revalidatingIdentity = false; identityKey = undefined; candidate = null; cancel(); invalidateHandoff(); exhausted = true; publish({ status: "unavailable", reason: "identity_unavailable", reference: null, snapshotReceived: false }); },
-    beginIdentityChange() { revalidatingIdentity = false; identity.requireReset(); identityKey = undefined; candidate = null; cancel(); invalidateHandoff(); publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false }); },
+    beginIdentityChange() { revalidatingIdentity = false; identity.requireReset(); identityKey = undefined; candidate = null; cancel(); invalidateHandoff(); if (!exhausted) publish({ status: "waiting", reason: "identity_pending", reference: null, snapshotReceived: false }); },
     start() { requested = true; idle = false; reconcile(); },
     stop() { requested = false; candidate = null; cancel(); invalidateHandoff(); publish({ status: "disabled", reason: "stopped", reference: null, snapshotReceived: false }); },
     restart() { cancel(); invalidateHandoff(); exhausted = false; budget.reset(); requested = true; idle = false; reconcile(); },

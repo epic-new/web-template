@@ -127,6 +127,26 @@ runtime through the real BFF against this relay, and frozen evidence/reference
 inputs. The latter uses an explicitly synthetic consumer boundary because the
 report submission UI/Controller is owned by later issues.
 
+### Regression coverage for lifecycle races
+
+These automated boundaries prepare the browser verification above; they do not
+replace actual Epic-host or Cloud evidence.
+
+| Scenario | Automated boundary |
+| --- | --- |
+| Consent, route, policy, auth and unmount revoke a pending lightweight runtime import | `components/tests/epic-replay-provider-runtime.test.tsx` uses the real runtime after delayed module delivery. |
+| Revocation during the pipeline import, including a stale import after regrant | `lib/replay/tests/replay-root-runtime.test.ts` checks recorder initialization and registration remain gated. |
+| Cross-tab invalidation stops the old producer while auth resolves | `components/tests/epic-replay-provider-runtime.test.tsx` delivers metadata-only BroadcastChannel messages and checks old recorder callbacks cannot enter the new stream. |
+| Two document runtimes follow a shared account change without crossing server subjects | `lib/replay/tests/replay-cross-tab-identity.test.ts` exercises real identity/recording/batch routes, Better Auth sessions, SQLite and the synthetic relay. |
+| Recovery debt survives remount, policy refresh, route reentry, repeated consent and reload | `lib/replay/tests/replay-root-runtime.test.ts` checks exhausted state/history, explicit restart and the healthy-progress threshold. |
+| Lost resume-registration ACK spends its one-shot handoff | `lib/replay/tests/replay-relay-lifecycle.test.ts` checks a budgeted fresh boundary and rejects a copied consumed candidate through the real BFF. |
+| Lost resumed-snapshot ACK retries the immutable batch | `lib/replay/tests/replay-relay-lifecycle.test.ts` and `replay-uploader.test.ts` check unchanged request bytes, a single accepted cursor advance, withheld resumed status and bounded retry exhaustion. |
+
+The independent central `replayBatchSchema` must be supplied or exercised by its
+owning checkout. The local synthetic schema is not that evidence. Do not read
+another issue's unfinished worktree to close this item when the execution scope
+is restricted to this checkout.
+
 ## Cleanup
 
 Withdraw consent, close the synthetic app tabs, and stop the fixture terminal
