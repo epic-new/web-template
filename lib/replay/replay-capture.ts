@@ -53,6 +53,8 @@ export interface ReplayCaptureSessionOptions {
   sampler?: ReplaySampler;
   record?: RecordFn;
   getPathname?: () => string;
+  /** Called after a URL change into a page that may be recorded. */
+  onNavigate?: (pathname: string) => void;
 }
 
 export function createReplayCaptureSession({
@@ -63,6 +65,7 @@ export function createReplayCaptureSession({
   sampler = replaySampler,
   record = rrwebRecord,
   getPathname = () => window.location.pathname,
+  onNavigate,
 }: ReplayCaptureSessionOptions) {
   let state: ReplayCaptureState = { status: "blocked", reason: "policy_disabled", boundary: 0 };
   let active: { boundary: number; privacy: string; stop?: () => void } | null = null;
@@ -185,6 +188,13 @@ export function createReplayCaptureSession({
       return;
     }
     if (!active) evaluate(getPathname(), "defer");
+    else {
+      try {
+        onNavigate?.(normalizeReplayPath(getPathname()));
+      } catch {
+        // A marker failure never reaches the page.
+      }
+    }
   }
 
   // Stops collection and clears every retained local event, independently of
@@ -251,6 +261,35 @@ export function createReplayCaptureSession({
       }
 
       evaluate();
+    },
+
+    /**
+     * Ends the current boundary and, if capture is still permitted, starts a
+     * new one with a fresh Meta and FullSnapshot. Used when the transport
+     * lost the recording and its history cannot be continued.
+     */
+    restartBoundary(): void {
+      if (!started) return;
+      clearTimeout(pendingStart);
+      pendingStart = undefined;
+      stopRecorder();
+      failed = false;
+      evaluate();
+    },
+
+    /**
+     * Adds a custom event to the current recording. Returns false, and does
+     * nothing, when no recording is running. The event passes the same gates
+     * and sanitizer as everything else.
+     */
+    addCustomEvent(tag: string, payload: unknown): boolean {
+      if (!active || typeof record.addCustomEvent !== "function") return false;
+      try {
+        record.addCustomEvent(tag, payload);
+        return true;
+      } catch {
+        return false;
+      }
     },
 
     /** Re-evaluates now, e.g. after the policy source was swapped. */
