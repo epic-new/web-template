@@ -20,14 +20,21 @@ epicReplayConsent.withdraw(); // stops capture now
 
 - The state starts `"unknown"`, which records nothing. Consent is never
   inferred from the policy, the environment or a provider being mounted.
-- The template keeps consent in memory only. The host's consent and disclosure
-  policy decides what to remember, and calls `grant()` again on load.
+- The consent state itself lives in memory only. The template ships a default
+  prompt (`components/replay-consent-banner.tsx`) that asks once, remembers the
+  choice in this browser (`lib/replay/replay-consent-choice.ts`) and re-applies
+  it on load. It shows only where a recording could follow: a signed-in user,
+  or a visitor when `EPIC_REPLAY_ANONYMOUS_CAPTURE=allow`. A host with its own
+  consent banner removes it and calls `grant()` / `withdraw()` itself.
+- The report form tells the visitor whether recording is on and lets them turn
+  it off or back on, through the same remembered choice. The report button
+  shows to a signed-out visitor only when `EPIC_REPLAY_ANONYMOUS_REPORTING=allow`.
 - `withdraw()` stops the recorder before it returns and clears the local
   buffer and any pending start, whichever gate is then reported as the reason
   (an expired or disabled policy does not keep earlier events). It does not delete recordings already uploaded; deletion is a
   separate Epic responsibility, and no UI may claim otherwise.
-- `app/styleguide/replay/behaviors/manage-replay-consent/` shows how a consent
-  UI wires to it.
+- `app/styleguide/replay/behaviors/manage-replay-consent/` shows how a custom
+  consent UI wires to it.
 
 ## Gates
 
