@@ -72,6 +72,10 @@ export const replayRegistrationRequestSchema = z
   .strict();
 export type ReplayRegistrationRequest = z.infer<typeof replayRegistrationRequestSchema>;
 
+/** Host identity must be acknowledged before registration can have central side effects. */
+export const replayIdentityRequestSchema = z.object({ contractVersion: contractVersionSchema }).strict();
+export const replayIdentityResponseSchema = z.object({ contractVersion: contractVersionSchema }).strict();
+
 export const replayCapabilityRequestSchema = z
   .object({ contractVersion: contractVersionSchema })
   .strict();

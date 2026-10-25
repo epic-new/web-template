@@ -91,7 +91,7 @@ describe("createReplayUploader", () => {
 
     await flush(1_000);
     expect(uploader.getState()).toMatchObject({ status: "registered", current: { startedAt: T0, boundary: 1 } });
-    expect(bodies()[0]!.body).toEqual({
+    expect(bodies().find(({ url }) => url.endsWith("/recordings"))!.body).toEqual({
       contractVersion: 1,
       idempotencyKey: expect.any(String),
       startedAt: T0,
@@ -124,6 +124,28 @@ describe("createReplayUploader", () => {
     ]);
     expect(browser.maxInFlight()).toBe(1);
     expect(uploader.getState().history[0]).toMatchObject({ outcome: "open", acceptedBatches: 3, availability: "events_received" });
+  });
+
+  it("retries a lost identity acknowledgment before any registration", async () => {
+    let relay: typeof fetch;
+    let identityCalls = 0;
+    const fixture = setup({
+      fetch: (async (url, init) => {
+        if (String(url).endsWith("/identity") && ++identityCalls === 1) throw new TypeError("response lost");
+        return relay(url, init);
+      }) as typeof fetch,
+    });
+    relay = fixture.browser.fetch;
+    fixture.uploader.push(meta(), 1);
+    fixture.uploader.push(full(), 1);
+    await flush(0);
+    expect(fixture.fixture.recordings()).toHaveLength(0);
+    await flush(500);
+    expect(identityCalls).toBe(2);
+    expect(fixture.fixture.recordings()).toHaveLength(1);
+    await flush(6_000);
+    expect(fixture.uploader.getState()).toMatchObject({ status: "pending" });
+    fixture.uploader.dispose();
   });
 
   it("keeps one request in flight across a closing and a new recording", async () => {
@@ -191,6 +213,7 @@ describe("createReplayUploader", () => {
           });
         }
         const response = await relay(url, init);
+        if (!String(url).endsWith("/recordings")) return response;
         const body = await response.json();
         return Response.json({ ...body, limits: { ...body.limits, maxBufferBytes: 1_000 } }, { status: response.status });
       }) as typeof fetch,
@@ -258,6 +281,7 @@ describe("createReplayUploader", () => {
 
     const paths = browser.log.map((entry) => `${entry.path.replace(/[0-9a-f-]{36}/, ":id")} ${entry.status} ${entry.code ?? ""}`.trim());
     expect(paths).toEqual([
+      "/identity 200",
       "/recordings 201",
       "/recordings/:id/batches 200",
       "/recordings/:id/batches 401 capability_expired",
@@ -358,7 +382,7 @@ describe("createReplayUploader", () => {
 
     expect(uploader.getState()).toMatchObject({ status: "unavailable", reason: "snapshot_too_large", bufferedEvents: 0 });
     expect(batches()).toHaveLength(0);
-    expect(browser.log.map((entry) => entry.path)).toEqual(["/recordings"]);
+    expect(browser.log.map((entry) => entry.path)).toEqual(["/identity"]);
 
     // The recording's own (tiny) limits apply as soon as registration returns them.
     const tiny = setup({ mode: "tiny_batch" });

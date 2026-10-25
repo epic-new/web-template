@@ -83,8 +83,8 @@ export function anonymousCaptureAllowed(): boolean {
 
 /**
  * The signed-in user, else the verified anonymous visitor when the host allows
- * anonymous capture. `mint` lets registration issue a visitor cookie for a
- * first anonymous request; the Set-Cookie value is returned for the response.
+ * anonymous capture. Only the identity bootstrap may mint a cookie; registration
+ * requires it already, so a lost registration response cannot change its subject.
  */
 export async function resolveReplayActor(
   request: NextRequest,
@@ -94,7 +94,7 @@ export async function resolveReplayActor(
   if (user) return { actor: { kind: "user", userId: user.id }, setCookie: null };
 
   const secret = process.env.BETTER_AUTH_SECRET;
-  if (!anonymousCaptureAllowed() || !secret) return { actor: null, setCookie: null };
+  if (!anonymousCaptureAllowed() || !secret || secret.length < 32) return { actor: null, setCookie: null };
 
   const visitorId = readReplayVisitorId(request.cookies.get(REPLAY_VISITOR_COOKIE)?.value, secret);
   if (visitorId) return { actor: { kind: "anonymous", visitorId }, setCookie: null };

@@ -133,9 +133,16 @@ synthetic fixture.
   rotating publishing token, never an email or name. Rotating the publishing
   token keeps every subject; rotating `BETTER_AUTH_SECRET` starts new ones.
 - Anonymous capture is off by default. With
-  `EPIC_REPLAY_ANONYMOUS_CAPTURE=allow`, registration (and only registration)
+  `EPIC_REPLAY_ANONYMOUS_CAPTURE=allow`, the same-origin `POST /identity`
   mints a random visitor id in a signed, HttpOnly `epic-replay-visitor`
-  cookie scoped to `/api/epic/replay`; a tampered cookie is ignored.
+  cookie scoped to `/api/epic/replay`. It creates no recording or central state.
+  The uploader waits for that acknowledgment before registration, which requires
+  the existing protected identity. Lost bootstrap responses are harmless; a lost
+  registration response retries under the same subject. A missing/tampered or
+  browser-blocked cookie cannot silently mint a replacement during registration.
+  `DELETE /identity` clears only this cookie for the provider's account boundary;
+  both methods require same-origin JSON `{ contractVersion: 1 }` and answer the
+  same no-store acknowledgment. Authentication cookies remain untouched.
 - A browser body carrying `subjectId`, `projectId`, `applicationId`,
   `environment`, `captureContext`, a Cloud id or any unknown field is a 400
   `invalid_request`. A recording id this server never bound to the current
@@ -155,8 +162,9 @@ normalized payload and resends it verbatim on a retry under the same key, so a
 later User-Agent or deployment change never re-derives it; a changed body
 under the same key is a 409 `idempotency_conflict`. Raw User-Agent, IP,
 location, cookies, title, referrer and screen size are never collected or
-forwarded, and the relay never copies incoming headers upstream. No event,
-capability or token is stored on the server.
+forwarded, and the relay never copies incoming headers upstream. The browser-only
+viewport is projected into `captureContext`; it is not a central top-level field.
+Raw events and recording capabilities are never stored in the local database.
 
 ### Bounds
 
@@ -173,7 +181,10 @@ capability or token is stored on the server.
   extra envelope allowance. An event that alone exceeds the limit (typically a
   FullSnapshot) ends the recording `snapshot_too_large`: never truncated,
   never fragmented.
-- One request in flight per recording. A batch's id, sequence, events and
+- One request is in flight across the transport, including a closing recording.
+  Current and closing recordings share one private-data buffer budget. Fetches
+  have a 12-second deadline within remaining retention and are aborted on
+  withdrawal, disposal or expiry. A batch's id, sequence, events and
   `final` flag are frozen before its first attempt, and only that frozen body
   is ever retried: up to `maxAttempts` (3) for network errors, 503 and 429,
   with backoff 500 ms, 1 s, 2 s and any `retryAfterMs`. Offline, no attempt is

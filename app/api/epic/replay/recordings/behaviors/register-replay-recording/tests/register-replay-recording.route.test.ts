@@ -9,6 +9,7 @@ import { deriveReplaySubject } from "@/lib/replay/server/replay-subject";
 import { IPHONE_SAFARI, registrationBody, setupSyntheticCentral } from "@/lib/replay/tests/replay-relay.fixture";
 import { APP_ORIGIN, replayRequest, routeParams, signUp } from "@/lib/replay/tests/replay-route.fixture";
 import { POST as register } from "../../../route";
+import { POST as establishIdentity } from "@/app/api/epic/replay/identity/route";
 import { POST as renew } from "../../../[recordingId]/capability/route";
 import { POST as upload } from "../../../[recordingId]/batches/route";
 
@@ -104,11 +105,13 @@ describe("POST /api/epic/replay/recordings", () => {
     await PostDB(db, schema, { replay_recording: [] });
 
     vi.stubEnv("EPIC_REPLAY_ANONYMOUS_CAPTURE", "allow");
-    const first = await register(replayRequest("/recordings", { body: registrationBody() }));
-    expect(first.status).toBe(201);
-    const setCookie = first.headers.get("set-cookie")!;
+    const identity = await establishIdentity(replayRequest("/identity", { body: { contractVersion: 1 } }));
+    expect(identity.status).toBe(200);
+    const setCookie = identity.headers.get("set-cookie")!;
     expect(setCookie).toMatch(/^epic-replay-visitor=[^;]+; Path=\/api\/epic\/replay; Max-Age=2592000; HttpOnly/);
     const visitorCookie = setCookie.split(";")[0]!;
+    const first = await register(replayRequest("/recordings", { body: registrationBody(), cookie: visitorCookie }));
+    expect(first.status).toBe(201);
 
     const reload = await register(replayRequest("/recordings", { body: registrationBody(), cookie: visitorCookie }));
     expect(reload.status).toBe(201);
@@ -117,8 +120,11 @@ describe("POST /api/epic/replay/recordings", () => {
     const tampered = await register(
       replayRequest("/recordings", { body: registrationBody(), cookie: `${visitorCookie.slice(0, -2)}xx` }),
     );
-    expect(tampered.status).toBe(201);
-    expect(tampered.headers.get("set-cookie")).toMatch(/^epic-replay-visitor=/);
+    expect(tampered.status).toBe(401);
+    expect(tampered.headers.get("set-cookie")).toBeNull();
+    const replacement = await establishIdentity(replayRequest("/identity", { body: { contractVersion: 1 }, cookie: `${visitorCookie.slice(0, -2)}xx` }));
+    const replacementCookie = replacement.headers.get("set-cookie")!.split(";")[0]!;
+    expect((await register(replayRequest("/recordings", { body: registrationBody(), cookie: replacementCookie }))).status).toBe(201);
 
     const rows = await db.select().from(schema.replayRecording);
     expect(rows).toHaveLength(3);

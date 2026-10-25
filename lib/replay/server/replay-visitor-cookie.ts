@@ -42,3 +42,11 @@ export function mintReplayVisitor(secret: string, secureContext: boolean) {
   ];
   return { visitorId, setCookie: attributes.join("; ") };
 }
+
+/** Clears only the replay identity, never the host application's authentication. */
+export function clearReplayVisitorCookie(secureContext: boolean): string {
+  return [
+    `${REPLAY_VISITOR_COOKIE}=`, "Path=/api/epic/replay", "Max-Age=0", "HttpOnly",
+    ...(secureContext ? ["SameSite=None", "Secure", "Partitioned"] : ["SameSite=Lax"]),
+  ].join("; ");
+}

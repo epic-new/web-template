@@ -5,6 +5,7 @@ import {
   REPLAY_PUBLISHING_ERROR_STATUS,
   replayBatchRequestSchema,
   replayCapabilityRequestSchema,
+  replayIdentityRequestSchema,
   replayRegistrationRequestSchema,
   type ReplayAvailability,
   type ReplayBatchAcknowledgment,
@@ -366,6 +367,10 @@ export function createSyntheticBrowserFetch(
 
   async function answer(path: string, body: unknown): Promise<SyntheticAnswer> {
     try {
+      if (path === "/identity") {
+        parseReplayRequest(replayIdentityRequestSchema, body);
+        return { status: 200, body: { contractVersion: 1 } };
+      }
       if (path === "/recordings") {
         const registration = parseReplayRequest(replayRegistrationRequestSchema, body);
         const { viewport, ...centralRegistration } = registration;

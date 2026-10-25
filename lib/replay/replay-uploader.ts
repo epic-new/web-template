@@ -11,6 +11,7 @@ import {
   REPLAY_TOKEN_MAX_LENGTH,
   REPLAY_UPLOAD_CONTRACT_VERSION,
   replayBatchAcknowledgmentSchema,
+  replayIdentityResponseSchema,
   replayRecordingCapabilitySchema,
   safeReplayPathname,
   type ReplayAvailability,
@@ -144,6 +145,8 @@ interface Recording {
   phase: "registering" | "open" | "ended";
   registration: ReplayRegistrationRequest;
   registrationAttempts: number;
+  identityAttempts: number;
+  identityReady: boolean;
   renewAttempts: number;
   renewing: boolean;
   reference: ReplayRecordingReference | null;
@@ -329,6 +332,8 @@ export function createReplayUploader({
         viewport: viewport ? { width: viewport.width, height: viewport.height } : null,
       },
       registrationAttempts: 0,
+      identityAttempts: 0,
+      identityReady: false,
       renewAttempts: 0,
       renewing: false,
       reference: null,
@@ -554,7 +559,8 @@ export function createReplayUploader({
       return;
     }
     if (rec.phase === "registering") {
-      void register(rec);
+      if (rec.identityReady) void register(rec);
+      else void establishIdentity(rec);
       return;
     }
     if (rec.renewing) {
@@ -607,6 +613,26 @@ export function createReplayUploader({
       renewed: false,
       attempts: 0,
     };
+  }
+
+  async function establishIdentity(rec: Recording) {
+    rec.identityAttempts++;
+    const outcome = await send(rec, "/identity", { contractVersion: REPLAY_UPLOAD_CONTRACT_VERSION });
+    if (!outcome) return;
+    if (outcome.kind !== "ok") {
+      if (offline(rec) && outcome.kind === "transient") rec.identityAttempts--;
+      if (fail(rec, outcome, rec.identityAttempts) === "renew") end(rec, "identity_required", "unavailable", false);
+      notify();
+      return;
+    }
+    if (!replayIdentityResponseSchema.safeParse(outcome.payload).success) {
+      end(rec, "unavailable", "unavailable", false);
+      notify();
+      return;
+    }
+    rec.identityReady = true;
+    if (checkRetention(rec)) pump(rec);
+    notify();
   }
 
   async function register(rec: Recording) {
