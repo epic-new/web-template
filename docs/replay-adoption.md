@@ -141,7 +141,7 @@ production build of the app being adopted.
 
 | What | Measured |
 |---|---|
-| Recorder chunk (`@rrweb/record`, dev, unminified) | 187 KB, loaded only once capture starts |
+| Recorder chunk (`@rrweb/record`, dev, unminified) | 187 KB, fetched only when a recording may start — never for a visitor who cannot be recorded |
 | First full snapshot of the page | 374 KB of JSON, of which 239 KB is inlined CSS (dev Tailwind) |
 | Steady state, scrolling for 50 s | 9 batches, 3.8 KB in total |
 | Long tasks (> 50 ms) during those 50 s | none |

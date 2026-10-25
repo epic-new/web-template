@@ -1,4 +1,4 @@
-import { record as rrwebRecord } from "@rrweb/record";
+import type { record as rrwebRecord } from "@rrweb/record";
 import type { eventWithTime } from "@rrweb/types";
 
 import type { PublicReplayConfig } from "./replay-config.contract";
@@ -51,6 +51,7 @@ export interface ReplayCaptureSessionOptions {
   subscribePolicy?: (listener: () => void) => () => void;
   consent?: ReplayConsentSource;
   sampler?: ReplaySampler;
+  /** A recorder to use as is (tests); otherwise `@rrweb/record` is loaded on the first start. */
   record?: RecordFn;
   getPathname?: () => string;
   /** Called after a URL change into a page that may be recorded. */
@@ -63,7 +64,7 @@ export function createReplayCaptureSession({
   subscribePolicy = (listener) => replayLifecycle.subscribe(listener),
   consent = epicReplayConsent,
   sampler = replaySampler,
-  record = rrwebRecord,
+  record: providedRecord,
   getPathname = () => window.location.pathname,
   onNavigate,
 }: ReplayCaptureSessionOptions) {
@@ -73,6 +74,10 @@ export function createReplayCaptureSession({
   let failed = false;
   let started = false;
   let pendingStart: ReturnType<typeof setTimeout> | undefined;
+  // The recorder is fetched only when a session may actually start, so a page
+  // whose policy, consent or route never allows capture never downloads it.
+  let record: RecordFn | undefined = providedRecord;
+  let loading: Promise<void> | null = null;
   const cleanups: (() => void)[] = [];
   const listeners = new Set<() => void>();
 
@@ -119,7 +124,21 @@ export function createReplayCaptureSession({
     block("policy_disabled");
   }
 
-  function startRecorder(policy: PublicReplayConfig) {
+  function loadRecorder() {
+    loading ??= import("@rrweb/record").then(
+      (module) => {
+        record = module.record;
+        // Permission is decided again: consent, route or policy may have changed meanwhile.
+        evaluate();
+      },
+      () => {
+        loading = null;
+        fail();
+      },
+    );
+  }
+
+  function startRecorder(policy: PublicReplayConfig, record: RecordFn) {
     const boundary = state.boundary + 1;
     const session = { boundary, privacy: JSON.stringify(policy.capture.privacy) } as NonNullable<typeof active>;
     // Node context (for value-only mutations) never crosses a boundary.
@@ -168,6 +187,10 @@ export function createReplayCaptureSession({
     if (active && active.privacy !== JSON.stringify(policy.capture.privacy)) stopRecorder();
     if (active) return;
     if (failed || !allowStart) return;
+    if (!record) {
+      loadRecorder();
+      return;
+    }
     if (allowStart === "defer") {
       clearTimeout(pendingStart);
       pendingStart = setTimeout(() => {
@@ -176,7 +199,7 @@ export function createReplayCaptureSession({
       }, 0);
       return;
     }
-    startRecorder(policy);
+    startRecorder(policy, record);
   }
 
   function onUrlChange() {
@@ -283,7 +306,7 @@ export function createReplayCaptureSession({
      * and sanitizer as everything else.
      */
     addCustomEvent(tag: string, payload: unknown): boolean {
-      if (!active || typeof record.addCustomEvent !== "function") return false;
+      if (!active || typeof record?.addCustomEvent !== "function") return false;
       try {
         record.addCustomEvent(tag, payload);
         return true;
