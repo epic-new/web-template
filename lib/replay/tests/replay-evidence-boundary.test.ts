@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { record as rrwebRecord } from "@rrweb/record";
-import type { eventWithTime } from "@rrweb/types";
+import { EventType, type eventWithTime } from "@rrweb/types";
 
 import { epicReplayConsent } from "../replay-consent";
 import { createReplayDocumentOwners } from "../replay-document-owner";
+import { parseReplayMarker } from "../replay-marker.contract";
 import { createReplayRecordingPipeline } from "../replay-recording-pipeline";
 import { createReplayRootRuntime, type ReplayRootRuntime } from "../replay-root-runtime";
-import { replayRegistrationRequestSchema, type ReplayRegistrationRequest } from "../replay-upload-contract";
+import { replayBatchRequestSchema, replayRegistrationRequestSchema, type ReplayRegistrationRequest } from "../replay-upload-contract";
 import { activeReplayPolicy } from "./replay-policy.fixture";
 import { createSyntheticBrowserFetch, createSyntheticEpi210 } from "./synthetic-epi210.core";
 
@@ -31,6 +32,82 @@ describe("frozen replay evidence boundary", () => {
     epicReplayConsent.reset();
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it.each(["stop/restart", "consent withdrawal"] as const)("drops late report acknowledgments after %s without retagging frozen evidence or the replacement recording", async (transition) => {
+    // This is an injected recorder/consumer boundary test. Real pinned-rrweb
+    // capture is covered separately in replay-capture.test.ts.
+    let emit: ((event: eventWithTime) => void) | undefined;
+    const record = ((options?: { emit?: (event: eventWithTime) => void }) => {
+      emit = options?.emit;
+      emit?.({ type: EventType.Meta, timestamp: Date.now(), data: { href: location.href, width: 100, height: 100 } } as eventWithTime);
+      emit?.({ type: EventType.FullSnapshot, timestamp: Date.now(), data: {
+        node: { type: 0, id: 1, childNodes: [] }, initialOffset: { left: 0, top: 0 },
+      } } as unknown as eventWithTime);
+      return () => { emit = undefined; };
+    }) as typeof rrwebRecord;
+    record.addCustomEvent = (tag, payload) => emit?.({ type: EventType.Custom, timestamp: Date.now(), data: { tag, payload } } as eventWithTime);
+    const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
+    const receivedReports: { recordingId: string; reportId: string; timestamp: number }[] = [];
+    const policy = activeReplayPolicy({}, { release: "build-A", configVersion: "1" });
+    runtime = createReplayRootRuntime({
+      documentRelease: "build-A", getPolicy: () => policy, subscribePolicy: () => () => {},
+      owners: createReplayDocumentOwners(), locks: null, monotonicNow: () => Date.now(),
+      pipelineOptions: { record }, loadPipeline: async () => ({ createReplayRecordingPipeline }),
+      fetch: async (input, init) => {
+        const response = await browser.fetch(input, init);
+        if (response.ok && String(input).endsWith("/batches")) {
+          const batch = replayBatchRequestSchema.parse(JSON.parse(String(init?.body)));
+          const recordingId = new URL(String(input), location.origin).pathname.match(/\/recordings\/([^/]+)\/batches$/)![1]!;
+          for (const event of batch.events) {
+            const parsed = event.type === EventType.Custom && parseReplayMarker(event.data);
+            if (parsed && parsed.success && parsed.marker.tag === "epic.bug.reported") {
+              receivedReports.push({ recordingId, reportId: parsed.marker.payload.reportId, timestamp: event.timestamp });
+            }
+          }
+        }
+        return response;
+      },
+    });
+    runtime.setIdentity("synthetic-user-1"); runtime.attach(); epicReplayConsent.grant();
+    await settle(5_100);
+    const frozen = runtime.getEvidenceReference()!;
+    expect(frozen).toMatchObject({ startedAt: T0, capturedAt: T0 + 5_100, offsetMs: 5_100, release: "build-A", configVersion: "1" });
+    expect(Object.isFrozen(frozen)).toBe(true);
+    const originalBytes = JSON.stringify(frozen);
+    const lateAcknowledgment = { durable: true, reportId: "synthetic-late-report" };
+
+    if (transition === "stop/restart") runtime.stop();
+    else epicReplayConsent.withdraw();
+    expect(runtime.getEvidenceReference()).toBeNull();
+    expect(runtime.trackAcknowledgedReport(lateAcknowledgment, frozen)).toEqual({ status: "dropped", reason: "capture_not_permitted" });
+    expect(runtime.getDiagnostics().pipeline?.upload.bufferedEvents).toBe(0);
+    const sentWhileUnavailable = browser.log.length;
+    await settle(1_000);
+    expect(browser.log).toHaveLength(sentWhileUnavailable);
+    expect(receivedReports).toEqual([]);
+
+    if (transition === "stop/restart") runtime.restart();
+    else epicReplayConsent.grant();
+    await settle(5_100);
+    const replacement = runtime.getEvidenceReference()!;
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", snapshotReceived: true });
+    expect(replacement.recordingId).not.toBe(frozen.recordingId);
+    expect(replacement.startedAt).toBeGreaterThan(frozen.startedAt);
+    const bufferedBeforeLateRetry = runtime.getDiagnostics().pipeline!.upload.bufferedEvents;
+    expect(runtime.trackAcknowledgedReport(lateAcknowledgment, frozen)).toEqual({ status: "dropped", reason: "stale_reference" });
+    expect(runtime.getDiagnostics().pipeline!.upload.bufferedEvents).toBe(bufferedBeforeLateRetry);
+    expect(runtime.getDiagnostics().markers.filter((marker) => marker.tag === "epic.bug.reported")).toEqual([]);
+    expect(JSON.stringify(frozen)).toBe(originalBytes);
+
+    // The replacement remains usable for an acknowledgment frozen against its
+    // own boundary; the old report never becomes a deferred retry there.
+    await settle(100);
+    const acknowledgedAt = Date.now();
+    expect(runtime.trackAcknowledgedReport({ durable: true, reportId: "synthetic-current-report" }, replacement)).toEqual({ status: "emitted" });
+    await settle(5_000);
+    expect(receivedReports).toEqual([{ recordingId: replacement.recordingId, reportId: "synthetic-current-report", timestamp: acknowledgedAt }]);
+    expect(JSON.stringify(frozen)).toBe(originalBytes);
   });
 
   it("submits and retries the original recording, build-A release and millisecond offset after policy refresh to build-B", async () => {

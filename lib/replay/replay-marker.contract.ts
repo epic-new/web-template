@@ -1,6 +1,6 @@
 import { jsonByteLength } from "./replay-redaction";
 
-/** Producer v1 proposal. Builder acceptance is separate from parsing this contract. */
+/** Agreed producer v1 contract. Builder reader and deployed acceptance remain separate. */
 export const REPLAY_MARKER_VERSION = 1 as const;
 export const REPLAY_MARKER_MAX_BYTES = 2_048;
 export const REPLAY_MARKER_MAX_ID_LENGTH = 128;

@@ -7,8 +7,10 @@ root recorder, sanitizer and bounded same-origin HTTP upload pipeline.
 
 `lib/replay/replay-marker.contract.ts` is the single browser-safe version-1
 producer contract. `lib/replay/tests/fixtures/epic-markers.v1.json` is a synthetic
-consumer fixture. Builder agreement with EPI-197 and deployed integration
-acceptance remain separate; these files do not establish either.
+consumer fixture. The Builder owner has agreed to this producer envelope and
+its limits in WEB-5's coordination record. EPI-197 reader implementation still
+awaits the verified exports; that agreement does not establish reader,
+deployment or Cloud playback acceptance.
 
 ## Emit a behavior occurrence
 
@@ -146,8 +148,10 @@ marker. Pending or failed submissions emit none. A repeated acknowledgment is
 deduplicated. Rotation, revocation, stop/restart or loss of attribution causes a
 drop; the API never reopens an old recording or places its marker on a
 replacement. Marker time is acknowledgment-time emission; the report's frozen
-moment remains separate. This checkout has synthetic contract tests, no report
-submission UI or production report-storage endpoint.
+moment remains separate. Report counts and associations remain authoritative
+database data and must never be inferred from markers. This checkout has
+synthetic contract tests, no report submission UI or production report-storage
+endpoint.
 
 ## Inspect and verify
 
@@ -165,7 +169,7 @@ is incomplete setup; the in-browser fallback cannot replace that evidence.
 Automated tests, browser acceptance, local relay receipt, deployed central
 acceptance, Builder consumption and Cloud playback are distinct results.
 
-External work stays with the epic-build owner: EPI-197 accepts/consumes the
-producer fixture, EPI-196/EPI-199 verify millisecond positioning, and the EPI-211
-consumer verifies durable acknowledgment mapping. No real Cloud keys or
-customer recordings are needed for these local checks.
+External work stays with the epic-build owner: EPI-197 implements and verifies
+consumption of the agreed producer fixture, EPI-196/EPI-199 verify millisecond
+positioning, and the EPI-211 consumer verifies durable acknowledgment mapping.
+No real Cloud keys or customer recordings are needed for these local checks.

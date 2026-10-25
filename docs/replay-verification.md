@@ -226,6 +226,19 @@ endpoint is invented for browser verification.
 | Errors remain single after repeated use | Browser-marker/runtime tests own classifications, listener cleanup and remount behavior; component tests call the public failure controls. Actual browser error handling is a Verify step. |
 | Freeze evidence through restart | Preview-upload Hook tests retain a frozen selected reference across a new recording; shared Hook tests expose immutable build-A context. Evidence/runtime tests own attribution, retry and immutable-release regressions. |
 
+The WEB-5 closeout regressions keep fault injection separate from actual
+recorder evidence:
+
+| Technical regression | Owning automated boundary |
+| --- | --- |
+| A valid public marker exceeds negotiated batch capacity | `replay-markers-runtime.test.ts` negotiates a schema-valid 900-byte capability through synthetic transport with an injected recorder. The 2,048-byte fixture normally fits every allowed ordinary marker. The larger marker passes parsing but returns `marker_too_large` before recorder admission; queue/history stay healthy and a smaller marker is accepted on the same recording. No marker allowlist or production wire limit changes. |
+| A recorder or sink throws while processing an error | `replay-capture.test.ts` injects each failure separately with the real browser-marker observer. No recursive emission, queue growth, unhandled rejection or application exception occurs; recovery admits only a new explicit marker. The pinned rrweb marker test in that file uses the actual recorder separately. |
+| A report acknowledgment arrives after stop/restart or consent withdrawal | `replay-evidence-boundary.test.ts` uses the public root runtime and injected recorder. Calls while unavailable and after replacement are dropped; only a new current-boundary report reaches synthetic transport, and the frozen build-A bookmark remains byte-stable. |
+
+These are automated local boundary checks, not the five Application relay
+browser scenarios. Run those in the separate Verify phase after the preview
+owner configures the active loopback relay policy.
+
 For Hook/component changes, run focused tests serially with one worker:
 
 ```sh

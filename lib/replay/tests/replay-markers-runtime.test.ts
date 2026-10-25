@@ -6,6 +6,9 @@ import { createReplayRootRuntime, type ReplayRootRuntime } from "../replay-root-
 import { createReplayDocumentOwners } from "../replay-document-owner";
 import { createReplayRecordingPipeline } from "../replay-recording-pipeline";
 import { epicReplayConsent } from "../replay-consent";
+import { parseReplayMarker, REPLAY_MARKER_MAX_BYTES } from "../replay-marker.contract";
+import { jsonByteLength } from "../replay-redaction";
+import { replayBatchRequestSchema, replayRecordingCapabilitySchema, REPLAY_SUBJECT_ALLOWANCE_BYTES, type ReplayBatchRequest } from "../replay-upload-contract";
 import { activeReplayPolicy } from "./replay-policy.fixture";
 import { createSyntheticBrowserFetch, createSyntheticEpi210 } from "./synthetic-epi210.core";
 
@@ -33,7 +36,7 @@ describe("provider-owned Epic markers", () => {
     for (const runtime of runtimes.splice(0)) runtime.dispose();
     epicReplayConsent.reset(); vi.useRealTimers(); vi.restoreAllMocks();
   });
-  function setup() {
+  function setup({ maxBatchBytes }: { maxBatchBytes?: number } = {}) {
     let emit: ((event: eventWithTime) => void) | undefined;
     const record = ((options?: { emit?: (event: eventWithTime) => void }) => {
       emit = options?.emit;
@@ -42,20 +45,75 @@ describe("provider-owned Epic markers", () => {
       return () => { emit = undefined; };
     }) as typeof rrwebRecord;
     record.addCustomEvent = (tag, payload) => emit?.({ type: 5, timestamp: Date.now(), data: { tag, payload } } as eventWithTime);
-    const browser = createSyntheticBrowserFetch(createSyntheticEpi210());
+    const fixture = createSyntheticEpi210();
+    if (maxBatchBytes !== undefined) fixture.setMode("tiny_batch");
+    const browser = createSyntheticBrowserFetch(fixture);
+    const batches: ReplayBatchRequest[] = [];
     let policy = activeReplayPolicy();
     const changes = new Set<() => void>();
     const runtime = createReplayRootRuntime({ documentRelease: "build-A", getPolicy: () => policy,
       subscribePolicy: (listener) => { changes.add(listener); return () => { changes.delete(listener); }; },
-      fetch: browser.fetch, pipelineOptions: { record }, loadPipeline: async () => ({ createReplayRecordingPipeline }),
+      fetch: async (input, init) => {
+        if (maxBatchBytes === undefined) return browser.fetch(input, init);
+        const path = String(input);
+        if (path.endsWith("/batches")) batches.push(replayBatchRequestSchema.parse(JSON.parse(String(init?.body))));
+        const response = await browser.fetch(input, init);
+        if (!path.endsWith("/recordings") || !response.ok) return response;
+        const capability = replayRecordingCapabilitySchema.parse(await response.json());
+        // The fixture's usual 2,048 bytes fits every allowed ordinary marker.
+        // Negotiate a smaller, schema-valid capability at this external seam;
+        // keep the real parser, root, capture, preflight and uploader intact.
+        const negotiated = replayRecordingCapabilitySchema.parse({ ...capability,
+          limits: { ...capability.limits, maxBatchBytes } });
+        return Response.json(negotiated, { status: response.status });
+      }, pipelineOptions: { record }, loadPipeline: async () => ({ createReplayRecordingPipeline }),
       owners: createReplayDocumentOwners(), locks: null, monotonicNow: () => Date.now() });
     runtimes.push(runtime);
     runtime.setIdentity("user-1");
-    return { runtime, record, browser, refresh: () => {
+    return { runtime, record, browser, batches, refresh: () => {
       policy = activeReplayPolicy({}, { release: "build-B", configVersion: "2" });
       for (const listener of changes) listener();
     } };
   }
+
+  it("drops a valid public marker beyond negotiated tiny capacity without ending the recording (injected recorder)", async () => {
+    const maxBatchBytes = 900;
+    const { runtime, record, browser, batches } = setup({ maxBatchBytes });
+    runtime.attach(); epicReplayConsent.grant(); await settle(5_100);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", snapshotReceived: true });
+    const reference = runtime.getSnapshot().reference!;
+    expect(reference).not.toBeNull();
+    expect(batches[0]!.events.slice(0, 2).map((event) => event.type)).toEqual([4, 2]);
+
+    const oversized = { tag: "epic.behavior.failed", payload: { version: 1,
+      behaviorId: "b".repeat(128), code: "c".repeat(128), occurrenceId: start.payload.occurrenceId } };
+    expect(parseReplayMarker(oversized)).toEqual({ success: true, marker: oversized });
+    expect(jsonByteLength(oversized)).toBeLessThan(REPLAY_MARKER_MAX_BYTES);
+    // It fits the marker and even the bare event budgets; the negotiated full
+    // batch envelope, maximum token and subject allowance make it unfit.
+    expect(jsonByteLength({ type: 5, timestamp: Date.now(), data: oversized })).toBeLessThan(maxBatchBytes);
+    const before = runtime.getDiagnostics();
+    const addCustomEvent = vi.spyOn(record, "addCustomEvent");
+    expect(runtime.track(oversized)).toEqual({ status: "dropped", reason: "marker_too_large" });
+    expect(addCustomEvent).not.toHaveBeenCalled();
+    expect(runtime.getDiagnostics().markers).toEqual(before.markers);
+    expect(runtime.getDiagnostics().pipeline!.upload).toEqual(before.pipeline!.upload);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", reference, snapshotReceived: true });
+
+    expect(runtime.track(start)).toEqual({ status: "emitted" });
+    await settle(5_100);
+    const delivered = batches.flatMap((batch) => batch.events).filter((event) => event.type === 5);
+    expect(delivered).toContainEqual({ type: 5, timestamp: T0 + 5_100, data: start });
+    expect(delivered.some((event) => (event.data as { tag?: string }).tag === oversized.tag)).toBe(false);
+    expect(batches.every((batch) => jsonByteLength(batch) + REPLAY_SUBJECT_ALLOWANCE_BYTES <= maxBatchBytes)).toBe(true);
+    expect(browser.log.filter((entry) => entry.path.endsWith("/batches")).every((entry) => entry.status === 200)).toBe(true);
+    expect(browser.log.filter((entry) => entry.path === "/recordings")).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({ status: "capturing", reference });
+    expect(runtime.getDiagnostics().pipeline!.upload).toMatchObject({ reason: null, bufferedEvents: 0, bufferedBytes: 0 });
+    expect(runtime.getDiagnostics().pipeline!.upload.history).toEqual([
+      expect.objectContaining({ reference, outcome: "open", reason: null, availability: "events_received" }),
+    ]);
+  });
 
   it("covers disabled/withdrawn tracking and a paired behavior occurrence without volatile public snapshots", async () => {
     const { runtime, browser } = setup();
