@@ -134,6 +134,9 @@ describe("sanitizeCssText", () => {
 
   it("redacts escaped import URLs and preserves ordinary escaped selectors", () => {
     expect(sanitizeCssText(String.raw`@im\70ort "a.css?\74oken=synthetic-import";`)).toBe('@import "[redacted]";');
+    expect(sanitizeCssText(String.raw`@import/*x*/"a.css?\74oken=synthetic-import";`)).toBe('@import "[redacted]";');
+    expect(sanitizeCssText(String.raw`@import /*"*/ /*y*/ 'a.css?\000074 oken=synthetic-import';`)).toBe("@import '[redacted]';");
+    expect(sanitizeCssText(String.raw`@import/*unfinished\escape`)).toBe(String.raw`@import/*unfinished\escape`);
     const selector = String.raw`.hover\:bg-blue-500:hover,.w-\[10px\]{width:10px;background:url(/public.png)}`;
     expect(sanitizeCssText(selector)).toBe(selector);
     const quoted = String.raw`[data-label="url(a\)b)"] { color:red } .a::after{content:'url(a\)b)'}`;

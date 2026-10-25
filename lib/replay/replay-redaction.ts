@@ -168,7 +168,13 @@ function redactEscapedCssResources(css: string): string {
       end = Math.min(end, css.length);
       if (css.slice(token.index, end).includes("\\")) replacement = `url("${REDACTED}")`;
     } else if (name === "import" && css[token.index - 1] === "@") {
-      while (/\s/.test(css[end] ?? "") && end < css.length) end++;
+      while (end < css.length) {
+        if (/\s/.test(css[end]!)) { end++; continue; }
+        if (!css.startsWith("/*", end)) break;
+        const close = css.indexOf("*/", end + 2);
+        end = close === -1 ? css.length : close + 2;
+      }
+      const resourceAt = end;
       const quote = css[end];
       if (quote === "'" || quote === '"') {
         for (end++; end < css.length; end++) {
@@ -176,7 +182,7 @@ function redactEscapedCssResources(css: string): string {
           if (css[end] === quote) { end++; break; }
         }
         end = Math.min(end, css.length);
-        if (css.slice(token.index, end).includes("\\")) replacement = `import ${quote}${REDACTED}${quote}`;
+        if (token[0].includes("\\") || css.slice(resourceAt, end).includes("\\")) replacement = `import ${quote}${REDACTED}${quote}`;
       }
     }
     if (replacement !== null) {
