@@ -131,3 +131,22 @@ the Builder.
 - Consent withdrawn, an excluded route, a disabled or expired policy, or an
   unsampled session all record nothing, and say which in the readout at
   `/styleguide/replay`.
+
+## Measured overhead
+
+Measured on 2026-10-25 against `/styleguide` in development mode (`next dev`,
+unminified), Chrome, with capture, console and network diagnostics on. These
+are a baseline to agree budgets from, not production figures; re-measure on a
+production build of the app being adopted.
+
+| What | Measured |
+|---|---|
+| Recorder chunk (`@rrweb/record`, dev, unminified) | 187 KB, loaded only once capture starts |
+| First full snapshot of the page | 374 KB of JSON, of which 239 KB is inlined CSS (dev Tailwind) |
+| Steady state, scrolling for 50 s | 9 batches, 3.8 KB in total |
+| Long tasks (> 50 ms) during those 50 s | none |
+| JS heap across those 50 s | no growth (58.7 MB → 57.7 MB) |
+
+The full snapshot dominates upload volume and grows with the page's DOM and
+stylesheets; stylesheets are inlined so the hosted player does not have to
+fetch them from a preview it cannot reach.
