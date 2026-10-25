@@ -162,3 +162,22 @@ Epic with the server's publishing credential.
   navigation (`epic.navigate`) and uncaught errors / unhandled rejections
   (`epic.error`) are recorded by the provider. Without a running recording they
   do nothing.
+
+## Diagnostics
+
+Console and network context are separate policy switches (Recording settings →
+Diagnostics), both off by default (`lib/replay/replay-diagnostics.ts`).
+
+- **Console:** `console.warn` and `console.error` only, as `epic.console`
+  `{ level, message }`; the message goes through the payload redaction and is
+  cut at 500 characters.
+- **Network:** `fetch` and `XMLHttpRequest`, as `epic.network`
+  `{ method, url, status, durationMs }`. The URL is the path for this site (the
+  origin only for another one), never the query or fragment; headers and
+  bodies are never read. `/api/epic/replay/*` and the framework's own requests
+  (`/_next/`, `/__nextjs*`) are never recorded.
+- Events land only while the capture session records, so consent, route and
+  expiry gates apply. Each stream is capped (20 events per 10 s, 300 per page).
+- The wrappers call the page's original functions with the same arguments and
+  return their results; switching a stream off, or disposing the provider,
+  restores the originals.

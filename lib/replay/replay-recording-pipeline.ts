@@ -4,6 +4,7 @@ import {
   type ReplayCaptureState,
 } from "./replay-capture";
 import { replayLifecycle } from "./replay-lifecycle";
+import { createReplayDiagnostics } from "./replay-diagnostics";
 import { createReplayMarkers, type ReplayEventResult } from "./replay-markers";
 import {
   createReplayUploader,
@@ -66,6 +67,14 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
   });
 
   const markers = createReplayMarkers((tag, payload) => session.addCustomEvent(tag, payload));
+  // Console and network context, each only while its own policy switch is on.
+  const diagnostics = createReplayDiagnostics(
+    (tag, payload) => session.addCustomEvent(tag, payload),
+    () => {
+      const policy = getPolicy();
+      return policy.status === "active" ? policy.capture.diagnostics : { console: false, network: false };
+    },
+  );
   const session = createReplayCaptureSession({
     ...rest,
     sink: uploader,
@@ -138,6 +147,7 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       }));
       // A stop that policy can lift resumes only on a different config version.
       cleanups.push(subscribePolicy(() => {
+        diagnostics.sync();
         if (stoppedAtConfig !== undefined && getPolicy().configVersion !== stoppedAtConfig) {
           stoppedAtConfig = undefined;
           session.start();
@@ -145,6 +155,7 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       }));
 
       markers.start();
+      diagnostics.start();
       const onPageHide = (event: PageTransitionEvent) => {
         if (!event.persisted) uploader.closeForUnload();
       };
@@ -160,6 +171,7 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       started = false;
       clearTimeout(restartTimer);
       markers.stop();
+      diagnostics.stop();
       for (const cleanup of cleanups.splice(0).reverse()) cleanup();
       session.dispose();
       uploader.clear();
