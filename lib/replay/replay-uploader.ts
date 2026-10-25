@@ -1,7 +1,6 @@
 import type { eventWithTime } from "@rrweb/types";
 import type { z } from "zod";
 
-import type { ReplayEventSink } from "./replay-buffer";
 import type { PublicReplayConfig } from "./replay-config.contract";
 import { jsonByteLength } from "./replay-redaction";
 import {

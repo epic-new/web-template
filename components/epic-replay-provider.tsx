@@ -82,9 +82,7 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
   // session blocks and resumes by policy, so a refresh gap does not tear the
   // pipeline down and re-register.
   const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    if (policy.status === "active" && policy.capture.enabled) setArmed(true);
-  }, [policy]);
+  if (!armed && policy.status === "active" && policy.capture.enabled) setArmed(true);
 
   const [identity, setIdentity] = useState<Identity>({ state: "pending" });
   const [pipelineState, setPipelineState] = useState<ReplayPipelineState | null>(null);
@@ -127,6 +125,8 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
     };
   }, [armed, identityPending, userId, release]);
 
+  const reportingEnabled = policy.status === "active" && policy.reporting.enabled;
+
   const value = useMemo<EpicReplay>(() => {
     const { status, reason } = statusOf(pipelineState, identity, armed);
     return {
@@ -135,17 +135,17 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
       capture: pipelineState?.capture ?? null,
       upload: pipelineState?.upload ?? null,
       evidence: "unverified",
-      reporting: { enabled: policy.status === "active" && policy.reporting.enabled },
+      reporting: { enabled: reportingEnabled },
       getRecordingReference: () => pipelineRef.current?.getRecordingReference() ?? null,
       event: (name, payload) =>
         pipelineRef.current?.event(name, payload) ?? { recorded: false, reason: "not_recording" },
     };
-  }, [pipelineState, identity, armed, policy]);
+  }, [pipelineState, identity, armed, reportingEnabled]);
 
   return (
     <EpicReplayContext.Provider value={value}>
       {children}
-      {value.reporting.enabled ? <ReplayReportButton release={release} /> : null}
+      {reportingEnabled ? <ReplayReportButton release={release} /> : null}
     </EpicReplayContext.Provider>
   );
 }
