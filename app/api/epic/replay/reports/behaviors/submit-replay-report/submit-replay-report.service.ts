@@ -12,8 +12,7 @@ import {
   ReportsResource,
   type ReportPayload,
 } from "@/shared/integrations/epic/resources/reports.resource";
-import { ReplayRecordingModel, type ReplayRecordingRecord } from "@/shared/models/replay-recording";
-import { ReplayRecordingPolicy } from "@/shared/policies/replay-recording.policy";
+import { ReplayRateLimitModel } from "@/shared/models/replay-rate-limit";
 
 const REPORT_RATE = { limit: 10, windowMs: 60_000 };
 
@@ -30,8 +29,9 @@ export interface ReportSubmission {
 
 /**
  * Relays a frozen bug report to Epic for the current trusted subject. The
- * browser's key, moment, route, release and evidence reference are forwarded
- * as frozen; only the subject is added. Nothing is acknowledged unless Epic
+ * browser's key, moment, route, release and evidence reference (session id,
+ * offset, trace and behavior ids) are forwarded as frozen; only the subject is
+ * added. Epic validates the reference. Nothing is acknowledged unless Epic
  * says it was stored, and a retry with the same key reaches Epic's own
  * idempotency, even after reporting has been switched off.
  */
@@ -46,12 +46,7 @@ export class SubmitReplayReport {
       if (!client || !secret) throw new ReplayUploadError("not_configured");
 
       const subjectId = deriveReplaySubject(command.actor, secret);
-      if (input.evidence) {
-        const record = await ReplayRecordingModel.findByRecordingId(input.evidence.recordingId);
-        this.authorize({ subjectId }, record, input.evidence.startedAt);
-      }
-
-      const rate = await ReplayRecordingModel.consumeRate(subjectId, "report", {
+      const rate = await ReplayRateLimitModel.consume(subjectId, "report", {
         ...REPORT_RATE,
         now: Date.now(),
       });
@@ -71,19 +66,6 @@ export class SubmitReplayReport {
       return await ReportsResource.submit(client, payload);
     } catch (error) {
       throw relayFailure(error);
-    }
-  }
-
-  // A recording this server never registered for the subject, or whose frozen
-  // start differs, is not evidence; it answers like any invalid reference.
-  private static authorize(
-    actor: { subjectId: string },
-    record: ReplayRecordingRecord | null,
-    startedAt: number,
-  ): void {
-    const frozenStart = (record?.registrationPayload as { startedAt?: unknown } | undefined)?.startedAt;
-    if (!ReplayRecordingPolicy.canAttach(actor, record) || frozenStart !== startedAt) {
-      throw new ReplayUploadError("invalid_evidence");
     }
   }
 }

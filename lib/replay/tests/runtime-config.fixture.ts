@@ -1,7 +1,7 @@
 import { vi } from "vitest";
 
 /**
- * Synthetic EPI-209 conformance fixtures. Never real credentials: the
+ * Synthetic runtime-config (version 2) conformance fixtures. Never real credentials: the
  * sentinels below must never appear in anything the browser receives.
  */
 
@@ -13,7 +13,7 @@ export const PREVIEW_TOKEN = "test-publishing-token-preview";
 export function runtimeConfigFixture(overrides: Record<string, unknown> = {}) {
   const issuedAt = Date.now();
   return {
-    contractVersion: 1,
+    contractVersion: 2,
     projectId: "proj-1",
     applicationId: "app-1",
     environment: "production",
@@ -23,6 +23,7 @@ export function runtimeConfigFixture(overrides: Record<string, unknown> = {}) {
     refreshIntervalMs: 30_000,
     capture: {
       enabled: true,
+      consentMode: "required",
       sessionSampleRate: 0.5,
       routes: { include: ["/"], exclude: ["/admin"] },
       privacy: {
@@ -33,8 +34,9 @@ export function runtimeConfigFixture(overrides: Record<string, unknown> = {}) {
       diagnostics: { console: true, network: false },
     },
     reporting: { enabled: true },
+    retention: { days: 30 },
     recording: {
-      transport: "epic-http",
+      transport: "otlp-relay",
       limits: {
         maxBatchBytes: 1_048_576,
         maxBatchEvents: 500,
@@ -43,6 +45,7 @@ export function runtimeConfigFixture(overrides: Record<string, unknown> = {}) {
         flushIntervalMs: 20_000,
         flushBytes: 65_536,
         maxAttempts: 3,
+        maxChunkBytes: 972_800,
       },
     },
     ...overrides,

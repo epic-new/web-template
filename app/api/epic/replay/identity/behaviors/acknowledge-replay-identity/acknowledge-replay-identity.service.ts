@@ -7,7 +7,7 @@ import { replayIdentityRequestSchema } from "@/lib/replay/replay-upload-contract
 import { isAnonymousReplayAllowed } from "@/lib/replay/server/replay-request";
 import { ReplayUploadError } from "@/lib/replay/server/replay-upload-error";
 import { relayFailure } from "@/lib/replay/server/relay-failure";
-import { ReplayRecordingModel } from "@/shared/models/replay-recording";
+import { ReplayRateLimitModel } from "@/shared/models/replay-rate-limit";
 
 /**
  * New anonymous visitors per network address. Every minted cookie is a fresh
@@ -32,7 +32,7 @@ export interface IdentityAcknowledgment {
 }
 
 /**
- * The identity handshake that precedes registration and anonymous reports.
+ * The identity handshake that precedes telemetry and anonymous reports.
  * It makes no central call and writes nothing: a lost response can be retried
  * and the subject Epic later sees cannot change under it, because the
  * anonymous cookie is minted here and nowhere else.
@@ -52,8 +52,8 @@ export class AcknowledgeReplayIdentity {
       // Keyed by an HMAC so no raw address is stored.
       const addressKey = `ip_${createHmac("sha256", replaySecret()!).update(`ip:${command.clientAddress ?? "unknown"}`).digest("base64url")}`;
       const now = Date.now();
-      await ReplayRecordingModel.pruneStale(now);
-      const rate = await ReplayRecordingModel.consumeRate(addressKey, "identity", { ...VISITOR_MINT_RATE, now });
+      await ReplayRateLimitModel.pruneStale(now);
+      const rate = await ReplayRateLimitModel.consume(addressKey, "identity", { ...VISITOR_MINT_RATE, now });
       if (!rate.allowed) throw new ReplayUploadError("rate_limited", { retryAfterMs: rate.retryAfterMs });
       return { mintVisitor: true };
     } catch (error) {

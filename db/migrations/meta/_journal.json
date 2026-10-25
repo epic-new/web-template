@@ -15,6 +15,13 @@
       "when": 1792934135932,
       "tag": "0001_shallow_hex",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792968876362,
+      "tag": "0002_drop_replay_recording",
+      "breakpoints": true
     }
   ]
 }

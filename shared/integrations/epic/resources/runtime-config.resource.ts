@@ -11,12 +11,12 @@ const intSchema = z.number().int();
 const positiveIntSchema = intSchema.positive();
 
 /**
- * Strict EPI-209 version 1 schema: unknown fields, malformed scope and any
+ * Strict version 2 schema: unknown fields, malformed scope and any
  * credential-bearing additions are rejected at every level.
  */
 const runtimeConfigResourceSchema = z
   .object({
-    contractVersion: z.literal(1),
+    contractVersion: z.literal(2),
     projectId: z.string(),
     applicationId: z.string(),
     environment: z.enum(["production", "preview", "development", "test"]),
@@ -27,6 +27,8 @@ const runtimeConfigResourceSchema = z
     capture: z
       .object({
         enabled: z.boolean(),
+        // Policies saved before consent mode existed asked for consent.
+        consentMode: z.enum(["required", "not_required"]).default("required"),
         sessionSampleRate: z.number(),
         routes: z
           .object({
@@ -47,9 +49,10 @@ const runtimeConfigResourceSchema = z
       })
       .strict(),
     reporting: z.object({ enabled: z.boolean() }).strict(),
+    retention: z.object({ days: positiveIntSchema }).strict(),
     recording: z
       .object({
-        transport: z.literal("epic-http"),
+        transport: z.literal("otlp-relay"),
         limits: z
           .object({
             maxBatchBytes: positiveIntSchema,
@@ -59,6 +62,7 @@ const runtimeConfigResourceSchema = z
             flushIntervalMs: positiveIntSchema,
             flushBytes: positiveIntSchema,
             maxAttempts: positiveIntSchema,
+            maxChunkBytes: positiveIntSchema,
           })
           .strict(),
       })

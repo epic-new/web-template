@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isAllowedEpicUrl, resolveOtlpEndpoint } from "@/lib/replay/server/otlp-endpoint";
 import {
   replayPublishingErrorBodySchema,
   type ReplayPublishingErrorCode,
@@ -31,7 +32,7 @@ export class EpicIntegrationError extends Error {
 }
 
 /**
- * A typed refusal from Epic's publishing routes (EPI-210/211): the exact HTTP
+ * A typed refusal from Epic's publishing routes (contract version 1): the exact HTTP
  * status, code and typed fields of the flat envelope. The message is fixed
  * text; Epic's own text, body and headers are never kept.
  */
@@ -58,11 +59,19 @@ type EpicEnv = Partial<Record<string, string | undefined>>;
 export class EpicClient {
   readonly projectId: string;
   readonly #baseUrl: string;
+  readonly #otlpUrl: string | null;
   readonly #token: string;
   readonly #protectionBypass: string | null;
 
-  private constructor(baseUrl: string, projectId: string, token: string, protectionBypass: string | null) {
+  private constructor(
+    baseUrl: string,
+    otlpUrl: string | null,
+    projectId: string,
+    token: string,
+    protectionBypass: string | null,
+  ) {
     this.#baseUrl = baseUrl;
+    this.#otlpUrl = otlpUrl;
     this.projectId = projectId;
     this.#token = token;
     this.#protectionBypass = protectionBypass;
@@ -81,23 +90,28 @@ export class EpicClient {
       return null;
     }
 
-    const isLocalHttp =
-      url.protocol === "http:" &&
-      url.hostname === "localhost" &&
-      env.NODE_ENV !== "production";
-    if (url.protocol !== "https:" && !isLocalHttp) return null;
+    if (!isAllowedEpicUrl(url, env)) return null;
 
     // A protected Epic (staging behind Vercel Deployment Protection) answers
     // every request with a login redirect unless it carries its bypass secret.
     const bypass = env.EPIC_VERCEL_PROTECTION_BYPASS?.trim() || null;
-    return new EpicClient(url.origin, projectId, token, bypass);
+    return new EpicClient(url.origin, resolveOtlpEndpoint(env, url), projectId, token, bypass);
   }
 
-  #headers(extra: Record<string, string>): Record<string, string> {
+
+  // The bypass secret belongs to the protected Epic only, never to another OTLP host.
+  /** Whether telemetry has somewhere to go: `EPIC_OTLP_ENDPOINT` is unset (derived) or valid. */
+  get otlpConfigured(): boolean {
+    return this.#otlpUrl !== null;
+  }
+
+  #headers(extra: Record<string, string>, origin = this.#baseUrl): Record<string, string> {
     return {
       Authorization: `Bearer ${this.#token}`,
       ...extra,
-      ...(this.#protectionBypass ? { "x-vercel-protection-bypass": this.#protectionBypass } : {}),
+      ...(this.#protectionBypass && origin === this.#baseUrl
+        ? { "x-vercel-protection-bypass": this.#protectionBypass }
+        : {}),
     };
   }
 
@@ -143,14 +157,38 @@ export class EpicClient {
   async post(
     path: string,
     body: unknown,
-    { signal, timeoutMs = REQUEST_TIMEOUT_MS }: { signal?: AbortSignal; timeoutMs?: number } = {},
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ status: number; body: unknown }> {
+    return this.#send(`${this.#baseUrl}${path}`, body, options);
+  }
+
+  /**
+   * POSTs OTLP/JSON to one signal of Epic's ingest (`/v1/logs`, ...) with the
+   * same discipline as `post`: only the credential and content headers leave.
+   */
+  async postOtlp(
+    signal: "logs" | "traces" | "metrics",
+    body: unknown,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ status: number; body: unknown }> {
+    if (!this.#otlpUrl) throw new EpicIntegrationError("unavailable");
+    return this.#send(`${this.#otlpUrl}/v1/${signal}`, body, options);
+  }
+
+  async #send(
+    url: string,
+    body: unknown,
+    { signal, timeoutMs = REQUEST_TIMEOUT_MS }: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<{ status: number; body: unknown }> {
     const timeout = AbortSignal.timeout(timeoutMs);
     let response: Response;
     try {
-      response = await fetch(`${this.#baseUrl}${path}`, {
+      response = await fetch(url, {
         method: "POST",
-        headers: this.#headers({ "Content-Type": "application/json", Accept: "application/json" }),
+        headers: this.#headers(
+          { "Content-Type": "application/json", Accept: "application/json" },
+          new URL(url).origin,
+        ),
         body: JSON.stringify(body),
         cache: "no-store",
         redirect: "error",

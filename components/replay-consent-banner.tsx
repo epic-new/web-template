@@ -4,11 +4,15 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { epicReplayConsent } from "@/lib/replay/replay-consent";
+import { disabledReplayConfig } from "@/lib/replay/replay-config.contract";
+import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
 import {
   chooseReplayConsent,
   followReplayConsentWithdrawals,
   readReplayConsentChoice,
 } from "@/lib/replay/replay-consent-choice";
+
+const serverPolicy = disabledReplayConfig({ reason: "unavailable", environment: null, release: null, now: 0 });
 
 const COPY = {
   body: "This app records how its pages are used, with anything you type hidden, to help fix problems faster.",
@@ -20,8 +24,10 @@ const COPY = {
  * The template's default consent prompt for session replay: shown only while
  * capture is enabled and no choice exists, remembered per browser, and
  * re-granted on load from that choice. Consent stays explicit — replay never
- * starts from the policy alone. A host with its own consent banner replaces
- * this with calls to `epicReplayConsent.grant()` / `.withdraw()`.
+ * starts from the policy alone. Where the policy's consent mode is
+ * `not_required` nothing is asked and recording is implied, but a remembered
+ * opt-out is still applied. A host with its own consent banner replaces this
+ * with calls to `epicReplayConsent.grant()` / `.withdraw()`.
  */
 export function ReplayConsentBanner() {
   const consent = useSyncExternalStore(
@@ -30,13 +36,15 @@ export function ReplayConsentBanner() {
     () => "unknown" as const,
   );
 
+  const policy = useSyncExternalStore(replayLifecycle.subscribe, replayLifecycle.getSnapshot, () => serverPolicy);
+
   useEffect(() => {
     const stored = readReplayConsentChoice();
     if (stored) chooseReplayConsent(stored);
     return followReplayConsentWithdrawals();
   }, []);
 
-  if (consent !== "unknown") return null;
+  if (consent !== "unknown" || policy.capture.consentMode === "not_required") return null;
 
   return (
     <div

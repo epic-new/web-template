@@ -1,9 +1,13 @@
 import "server-only";
 
-import { replayReportResponseSchema, type ReplayReportResponse } from "@/lib/replay/replay-upload-contract";
+import {
+  replayReportResponseSchema,
+  type ReplayReportEvidence,
+  type ReplayReportResponse,
+} from "@/lib/replay/replay-upload-contract";
 import { EpicIntegrationError, type EpicClient } from "../epic";
 
-/** The EPI-211 version 1 report body: the browser's frozen content plus the trusted subject. */
+/** The version 1 report body: the browser's frozen content plus the trusted subject. */
 export interface ReportPayload {
   contractVersion: 1;
   idempotencyKey: string;
@@ -13,7 +17,7 @@ export interface ReportPayload {
   reportedAt: number;
   route: string;
   release: string | null;
-  evidence: { recordingId: string; startedAt: number; offsetMs: number } | null;
+  evidence: ReplayReportEvidence | null;
 }
 
 export const ReportsResource = {

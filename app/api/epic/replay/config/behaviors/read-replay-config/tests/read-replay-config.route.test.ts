@@ -95,7 +95,7 @@ describe("GET /api/epic/replay/config", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const body = await response.json();
     expect(body).toMatchObject({
-      contractVersion: 1,
+      contractVersion: 2,
       status: "disabled",
       reason: "not_configured",
       environment: "test",
@@ -115,6 +115,7 @@ describe("GET /api/epic/replay/config", () => {
         "refreshIntervalMs",
         "capture",
         "reporting",
+        "retention",
         "recording",
       ].sort(),
     );

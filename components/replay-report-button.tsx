@@ -23,20 +23,24 @@ import {
   type ReplayReportRequest,
   type ReplayUploadErrorCode,
 } from "@/lib/replay/replay-upload-contract";
+import { disabledReplayConfig } from "@/lib/replay/replay-config.contract";
 import { epicReplayConsent } from "@/lib/replay/replay-consent";
 import { chooseReplayConsent } from "@/lib/replay/replay-consent-choice";
+import { replayLifecycle } from "@/lib/replay/replay-lifecycle";
 import { useEpicReplay } from "@/lib/replay/use-epic-replay";
+
+const serverPolicy = disabledReplayConfig({ reason: "unavailable", environment: null, release: null, now: 0 });
 
 const COPY = {
   trigger: "Report a problem",
   title: "Report a problem",
-  descriptionEvidence: "Tell us what went wrong. A recording of this session is attached and may take a moment to become available.",
-  descriptionAbsent: "Tell us what went wrong. No session recording is attached to this report.",
+  descriptionEvidence: "Tell us what went wrong. A reference to this session is attached and the recording may take a moment to become available.",
+  descriptionAbsent: "Tell us what went wrong. No session is attached to this report.",
   what: "What happened?",
   expected: "What did you expect? (optional)",
   send: "Send report",
   sending: "Sending...",
-  sendWithoutRecording: "Send without recording",
+  sendWithoutRecording: "Send without session",
   cancel: "Cancel",
   close: "Close",
   thanks: "Thanks, your report was received.",
@@ -50,7 +54,7 @@ const COPY = {
 const ERRORS: Partial<Record<ReplayUploadErrorCode, string>> = {
   reporting_disabled: "Reporting is turned off right now. Your draft is kept.",
   rate_limited: "Too many reports in a short time. Wait a moment and send again.",
-  invalid_evidence: "The session recording could not be attached.",
+  invalid_evidence: "The session could not be attached.",
   identity_required: "Sign in to send a report.",
   not_configured: "Reporting is not set up for this app.",
   idempotency_conflict: "This report changed after an earlier attempt. Send it again to submit the new version.",
@@ -68,10 +72,13 @@ interface FrozenContext {
 
 /**
  * The floating report button and its form. Everything that identifies the
- * moment - when the form opened, the page, the build and the recording with
- * its millisecond offset - is frozen at open, so navigating, a configuration
- * refresh or a recording rotation cannot retarget it. Submitting needs no
- * recording and works while capture is off.
+ * moment - when the form opened, the page, the build and the session with its
+ * millisecond offset, last trace id and last behavior marker - is frozen at
+ * open, before the form renders, so navigating, a configuration refresh or a
+ * session rotation cannot retarget it, and nothing the person types is part of
+ * it. The queued telemetry is flushed before the report is sent, so the
+ * session reaches Epic first. Submitting needs no session and works while
+ * capture is off.
  *
  * The container is `data-private`, so a recording shows an empty box of the
  * same size instead of what the person types.
@@ -84,22 +91,27 @@ export function ReplayReportButton({ release }: { release: string | null }) {
   const [expected, setExpected] = useState("");
   const [frozen, setFrozen] = useState<FrozenContext | null>(null);
   const [withoutEvidence, setWithoutEvidence] = useState(false);
+  const [flushing, setFlushing] = useState(false);
+  const policy = useSyncExternalStore(replayLifecycle.subscribe, replayLifecycle.getSnapshot, () => serverPolicy);
   const { submit, isSending, acknowledgment, errorCode, reset } = useSubmitReplayReport();
   // One logical submission keeps one key until its content changes or it ends.
   const attempt = useRef<{ key: string; body: string } | null>(null);
 
   function freezeContext() {
     const reportedAt = Date.now();
-    const reference = replay.getRecordingReference();
+    const reference = replay.getSessionReference();
     setFrozen({
       reportedAt,
       route: toReplayPathname(window.location.pathname) ?? "/",
       release,
       evidence: reference
         ? {
-            recordingId: reference.recordingId,
+            sessionId: reference.sessionId,
             startedAt: reference.startedAt,
             offsetMs: Math.max(reportedAt - reference.startedAt, 0),
+            ...(reference.traceId ? { traceId: reference.traceId } : {}),
+            ...(reference.behaviorId ? { behaviorId: reference.behaviorId } : {}),
+            ...(reference.occurrenceId ? { occurrenceId: reference.occurrenceId } : {}),
           }
         : null,
     });
@@ -122,9 +134,9 @@ export function ReplayReportButton({ release }: { release: string | null }) {
     reset();
   }
 
-  function onSubmit(event: FormEvent) {
+  async function onSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!frozen || isSending || !description.trim()) return;
+    if (!frozen || isSending || flushing || !description.trim()) return;
 
     const request: Omit<ReplayReportRequest, "idempotencyKey"> = {
       contractVersion: 1,
@@ -143,21 +155,31 @@ export function ReplayReportButton({ release }: { release: string | null }) {
     const key = keep ? attempt.current!.key : crypto.randomUUID();
     attempt.current = { key, body };
 
+    // The session's telemetry goes first; a flush that gives up never blocks the report.
+    setFlushing(true);
+    try {
+      if (request.evidence) await replay.flush();
+    } finally {
+      setFlushing(false);
+    }
     submit({ ...request, idempotencyKey: key });
   }
 
-  // After durable success, mark only the recording the report refers to, with
+  // After durable success, mark only the session the report refers to, with
   // nothing but the report reference. Emitted once per acknowledgment.
   const reported = useRef<string | null>(null);
   useEffect(() => {
     if (!acknowledgment || reported.current === acknowledgment.reportId) return;
     reported.current = acknowledgment.reportId;
     if (!frozen?.evidence || withoutEvidence) return;
-    if (replay.getRecordingReference()?.recordingId === frozen.evidence.recordingId) {
+    if (replay.getSessionReference()?.sessionId === frozen.evidence.sessionId) {
       replay.event("epic.bug.reported", { reportId: acknowledgment.reportId });
     }
   }, [acknowledgment, frozen, replay, withoutEvidence]);
 
+  // Where consent is not required, an unanswered prompt means recording is on.
+  const effectiveConsent =
+    consent === "unknown" && policy.capture.consentMode === "not_required" ? "granted" : consent;
   const evidenceLine =
     frozen?.evidence && !withoutEvidence ? COPY.descriptionEvidence : COPY.descriptionAbsent;
   const errorMessage = errorCode ? (ERRORS[errorCode] ?? FALLBACK_ERROR) : null;
@@ -214,15 +236,15 @@ export function ReplayReportButton({ release }: { release: string | null }) {
               </div>
 
               {/* The one place a visitor who already chose can change their mind. */}
-              {replay.status !== "disabled" && consent !== "unknown" ? (
+              {replay.status !== "disabled" && effectiveConsent !== "unknown" ? (
                 <p className="text-muted-foreground flex flex-wrap items-center gap-1 text-xs">
-                  {consent === "granted" ? COPY.recordingOn : COPY.recordingOff}
+                  {effectiveConsent === "granted" ? COPY.recordingOn : COPY.recordingOff}
                   <button
                     type="button"
                     className="text-foreground underline underline-offset-2"
-                    onClick={() => chooseReplayConsent(consent === "granted" ? "withdrawn" : "granted")}
+                    onClick={() => chooseReplayConsent(effectiveConsent === "granted" ? "withdrawn" : "granted")}
                   >
-                    {consent === "granted" ? COPY.turnOff : COPY.turnOn}
+                    {effectiveConsent === "granted" ? COPY.turnOff : COPY.turnOn}
                   </button>
                 </p>
               ) : null}
@@ -242,8 +264,8 @@ export function ReplayReportButton({ release }: { release: string | null }) {
                 <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                   {COPY.cancel}
                 </Button>
-                <Button type="submit" disabled={isSending || !description.trim()}>
-                  {isSending ? COPY.sending : COPY.send}
+                <Button type="submit" disabled={isSending || flushing || !description.trim()}>
+                  {isSending || flushing ? COPY.sending : COPY.send}
                 </Button>
               </DialogFooter>
             </form>

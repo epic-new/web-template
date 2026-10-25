@@ -9,7 +9,7 @@ import { z } from "zod";
  * browser.
  */
 
-export const REPLAY_CONFIG_CONTRACT_VERSION = 1;
+export const REPLAY_CONFIG_CONTRACT_VERSION = 2;
 
 // Polling cadence, not an unconditional end-to-end disable guarantee.
 export const MIN_REFRESH_INTERVAL_MS = 10_000;
@@ -18,7 +18,16 @@ export const MAX_REFRESH_INTERVAL_MS = 60_000;
 
 export const MAX_POLICY_TTL_MS = 300_000;
 
-// Initial upper limits from EPI-209.
+/**
+ * `required`: nothing is recorded until the visitor accepts. `not_required`:
+ * the application decided consent is not needed; the visitor can still opt out.
+ */
+export const REPLAY_CONSENT_MODES = ["required", "not_required"] as const;
+export type ReplayConsentMode = (typeof REPLAY_CONSENT_MODES)[number];
+
+export const REPLAY_RETENTION_DAYS = { min: 1, max: 30, default: 30 } as const;
+
+// Mirrors Epic's runtime-config limits (contract version 2).
 export const REPLAY_RECORDING_LIMITS = {
   maxBatchBytes: 1_048_576,
   maxBatchEvents: 500,
@@ -27,6 +36,8 @@ export const REPLAY_RECORDING_LIMITS = {
   flushIntervalMs: 20_000,
   flushBytes: 65_536,
   maxAttempts: 3,
+  // ClickStack's replay chunk size: a larger rrweb event is split into chunk records.
+  maxChunkBytes: 972_800,
 } as const;
 
 export const replayEnvironmentSchema = z.enum([
@@ -60,6 +71,7 @@ export const replayRecordingLimitsSchema = z
     flushIntervalMs: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.flushIntervalMs),
     flushBytes: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.flushBytes),
     maxAttempts: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.maxAttempts),
+    maxChunkBytes: positiveIntSchema.max(REPLAY_RECORDING_LIMITS.maxChunkBytes),
   })
   .strict();
 
@@ -82,6 +94,7 @@ export const publicReplayConfigSchema = z
     capture: z
       .object({
         enabled: z.boolean(),
+        consentMode: z.enum(REPLAY_CONSENT_MODES),
         sessionSampleRate: z.number().min(0).max(1),
         routes: z
           .object({
@@ -105,9 +118,14 @@ export const publicReplayConfigSchema = z
       })
       .strict(),
     reporting: z.object({ enabled: z.boolean() }).strict(),
+    retention: z
+      .object({
+        days: z.number().int().min(REPLAY_RETENTION_DAYS.min).max(REPLAY_RETENTION_DAYS.max),
+      })
+      .strict(),
     recording: z
       .object({
-        transport: z.literal("epic-http"),
+        transport: z.literal("otlp-relay"),
         limits: replayRecordingLimitsSchema,
       })
       .strict(),
@@ -163,6 +181,7 @@ export function disabledReplayConfig({
     refreshIntervalMs: DEFAULT_REFRESH_INTERVAL_MS,
     capture: {
       enabled: false,
+      consentMode: "required",
       sessionSampleRate: 0,
       routes: { include: [], exclude: [] },
       privacy: {
@@ -173,8 +192,9 @@ export function disabledReplayConfig({
       diagnostics: { console: false, network: false },
     },
     reporting: { enabled: false },
+    retention: { days: REPLAY_RETENTION_DAYS.default },
     recording: {
-      transport: "epic-http",
+      transport: "otlp-relay",
       limits: { ...REPLAY_RECORDING_LIMITS },
     },
   };

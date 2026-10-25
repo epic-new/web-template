@@ -8,7 +8,8 @@ existing app, is in [replay-adoption.md](./replay-adoption.md).
 
 Adding this code records nothing. No capture session runs outside the harness
 until the root provider mounts one, and even then nothing is recorded until the
-host application grants consent.
+host application grants consent, unless the policy's consent mode is
+`not_required` (see below).
 
 ## Consent
 
@@ -19,8 +20,13 @@ epicReplayConsent.grant();    // the person agreed under the host's disclosure
 epicReplayConsent.withdraw(); // stops capture now
 ```
 
-- The state starts `"unknown"`, which records nothing. Consent is never
-  inferred from the policy, the environment or a provider being mounted.
+- The state starts `"unknown"`, which records nothing under the default
+  `consentMode: "required"`. Consent is never inferred from the environment or a
+  provider being mounted.
+- With `consentMode: "not_required"` in the policy, `"unknown"` is treated as
+  granted: recording starts without a prompt and the template's banner is not
+  shown. Only an explicit `withdraw()` (or a remembered opt-out, applied on
+  load) stops it. The mode is Epic's policy; the application cannot set it.
 - The consent state itself lives in memory only. The template ships a default
   prompt (`components/replay-consent-banner.tsx`) that asks once, remembers the
   choice in this browser (`lib/replay/replay-consent-choice.ts`) and re-applies
@@ -46,10 +52,13 @@ in this order. The first failure is the reason capture is blocked:
 |---|---|
 | `policy_disabled` | The policy is not active, capture is off, or its environment is unresolved |
 | `policy_expired` | The policy's lifetime ran out (checked synchronously on every event) |
-| `consent_absent` | The host has not called `grant()` |
+| `consent_absent` | The host has not called `grant()` (mode `required` only) |
 | `consent_withdrawn` | The host called `withdraw()` |
 | `route_excluded` | The current route is not eligible |
 | `not_sampled` | This session was not selected by the sample rate |
+
+Behavior and error **evidence** (see below) passes every gate except
+`not_sampled`.
 
 The capture session (`lib/replay/replay-capture.ts`) re-checks every gate before
 each event is admitted, stops synchronously on any URL change into an excluded
@@ -116,8 +125,8 @@ recording that is already sampled in.
   without their FullSnapshot.
 - **Errors**: name, message and stack are bounded and have their URLs
   sanitized.
-- **Diagnostics**: a network entry keeps only method, sanitized URL, status and
-  duration. Request and response headers and bodies are never included, and
+- **Diagnostics**: a network entry keeps only method, sanitized URL, status,
+  duration and the `traceparent` trace id of the request. Request and response headers and bodies are never included, and
   the replay configuration, ingestion and report endpoints (`/api/epic/replay/*`)
   are never diagnosed.
 
@@ -128,45 +137,66 @@ by `EpicReplayProvider` in the root layout. Nothing leaves the browser except
 through this application's own routes under `/api/epic/replay`, which relay to
 Epic with the server's publishing credential.
 
-- **Ownership.** Project and environment come from the credential, the subject
-  from the server's identity: `sub_` plus an HMAC of the signed-in user id (or a
-  protected visitor id) under `BETTER_AUTH_SECRET`. The browser never sends a
-  subject, project, environment or Epic id, and the routes reject them. Rotating
-  the publishing token does not change a subject.
+- **Ownership.** Project, application and environment come from the credential,
+  the subject from the server's identity: `sub_` plus an HMAC of the signed-in
+  user id (or a protected visitor id) under `BETTER_AUTH_SECRET`. The browser
+  never sends a subject, project, environment or Epic id; the relay rebuilds
+  each OTLP resource from its session id and release, adds the subject
+  (`epic.subject.id`, which Epic stores only as a hash) and the coarse capture
+  context, and drops every `epic.*`, `deployment.environment.name` and
+  `service.name` attribute the browser sent. Rotating the publishing token does
+  not change a subject.
 - **Anonymous visitors** are off by default. `EPIC_REPLAY_ANONYMOUS_CAPTURE=allow`
   (recording) and `EPIC_REPLAY_ANONYMOUS_REPORTING=allow` (reports) let
   `POST /api/epic/replay/identity` mint a signed, HttpOnly visitor cookie scoped
-  to `/api/epic/replay`. Registration and reports never mint one; a client that
+  to `/api/epic/replay`. Telemetry and reports never mint one; a client that
   blocks the cookie fails closed.
-- **Registration first.** Events wait in bounded memory (`maxBufferBytes`,
-  `maxBufferAgeMs`, measured on the monotonic clock) until Epic returns a
-  recording id; `startedAt` is the first event's timestamp and survives retries.
-- **Batches.** One request in flight; each batch's id, sequence and events are
-  frozen before the first attempt and only that batch is retried (up to
-  `maxAttempts`, backoff 500 ms, 1 s, 2 s) after a network error, a timeout,
-  `unavailable` or `rate_limited` (which waits `retryAfterMs`). A batch leaves
-  after `flushIntervalMs`, once `flushBytes` are queued, or when the tab turns
-  hidden; sequence 0 (Meta then FullSnapshot) leaves at once. A retried batch may
-  already be stored: Epic's playback drops exact duplicate events. An expired capability is renewed and
-  the identical batch resent. A single event larger than `maxBatchBytes` ends the
-  recording as "snapshot too large"; nothing is truncated.
-- **A recording that cannot continue** (every attempt failed, or
-  `recording_closed`) is never renumbered or continued past a gap: it is marked incomplete and,
-  within a restart budget of `maxAttempts` that refills only after a recording
-  uploads two batches, a new recording starts with a new key and FullSnapshot.
-- **Evidence stays unverified.** A registration or accepted batch is never
-  presented as playable; only Epic can verify playback.
+- **Sessions.** The session id (`rum.sessionId`) is 32 hex characters from
+  `crypto.getRandomValues`, kept in `sessionStorage` with its start and last
+  activity. A reload within 15 minutes of inactivity continues it, with its
+  `rr-web.offset` counter; 15 minutes idle or 4 hours of age starts a new one,
+  and a new session always opens with a new Meta and FullSnapshot.
+- **Requests.** Records wait in bounded memory (`maxBufferBytes`,
+  `maxBufferAgeMs`, measured on the monotonic clock). One request is in flight;
+  its records (one session, in order, at most `maxBatchBytes` of event bytes and
+  `maxBatchEvents` records) are frozen before the first attempt and only that
+  request is retried (up to `maxAttempts`, backoff 500 ms, 1 s, 2 s) after a
+  network error, `unavailable` or `rate_limited` (which waits `Retry-After`). A
+  request leaves after `flushIntervalMs`, once `flushBytes` are queued, or when
+  the tab turns hidden (with `keepalive` when it fits 64 KB). A retried request
+  may already be stored: Epic's playback drops exact duplicate records. A record
+  larger than the request budget ends capture as "snapshot too large"; nothing is
+  truncated.
+- **A boundary that cannot continue** (every attempt failed, or the buffer was
+  exceeded) is never renumbered or continued past a gap: within a restart
+  budget of `maxAttempts` that refills only after a boundary uploads two
+  requests, a new boundary starts with a new FullSnapshot. A rotated session
+  restarts the boundary without spending the budget.
+- **Evidence.** `epic.behavior.*` markers and uncaught errors / unhandled
+  rejections are also sent as plain log records (scope `epic.evidence`) with
+  the session id, a route (pathname only) and a bounded, redacted text body,
+  regardless of replay sampling.
+- **Evidence stays unverified.** An accepted request is never presented as
+  playable; only Epic can verify playback.
 - **Reports** (`POST /api/epic/replay/reports`) work with capture off. The form
-  freezes the moment, route, build and recording reference (with its
-  recording-relative millisecond offset) when it opens, keeps the draft on
-  failure, and resends the same idempotency key. The button and form are
-  `data-private`.
+  freezes the moment, route, build and session reference (session id, session
+  start, millisecond offset, the last request's trace id and the last behavior
+  marker) when it opens, before the form renders; nothing typed is part of it.
+  Submitting first flushes the queued telemetry so the session reaches Epic
+  first, keeps the draft on failure, and resends the same idempotency key (also
+  on a 503). If Epic refuses the reference (`invalid_evidence`) the form offers
+  to send the report without a session. The button and form are `data-private`.
 - **Markers.** `useEpicReplay().event(name, payload)` records
   `epic.screen.viewed`, `epic.behavior.started|succeeded|failed` and
   `epic.bug.reported` with only `behaviorId`, `occurrenceId` and `reportId`;
   navigation (`epic.navigate`) and uncaught errors / unhandled rejections
-  (`epic.error`) are recorded by the provider. Without a running recording they
-  do nothing.
+  (`epic.error`) are recorded by the provider. Without a running recording the
+  replay markers do nothing; behavior and error evidence is still sent while
+  the other gates pass.
+- **Trace context.** While capture is allowed, same-origin `fetch` and XHR
+  calls (never `/api/epic/replay/*`, never another origin) carry a `traceparent`
+  header with a random trace id; the server continues it (see
+  [replay-adoption.md](./replay-adoption.md#server-tracing)).
 
 ## Diagnostics
 
@@ -179,7 +209,7 @@ Diagnostics), both off by default (`lib/replay/replay-diagnostics.ts`).
   auth headers, provider keys, `password=…` pairs and long hex secrets, and is
   cut at 500 characters.
 - **Network:** `fetch` and `XMLHttpRequest`, as `epic.network`
-  `{ method, url, status, durationMs }`. The URL is the path for this site (the
+  `{ method, url, status, durationMs, traceId? }`. The URL is the path for this site (the
   origin only for another one), never the query or fragment, with id- and
   token-like segments replaced by `:id`; headers and bodies are never read.
   `/api/epic/replay/*` and the framework's own requests

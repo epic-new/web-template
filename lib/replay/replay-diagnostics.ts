@@ -5,6 +5,7 @@ import {
   sanitizeReplayPayload,
   sanitizeReplayText,
 } from "./replay-redaction";
+import { TRACE_ID_PATTERN, traceIdOf, type ReplayTracing } from "./replay-tracing";
 
 /**
  * Optional console and network context, recorded as rrweb custom events
@@ -16,8 +17,8 @@ import {
  *
  * Nothing private leaves: console text goes through the payload redaction and
  * is bounded; a request records only method, path (no query, no fragment, the
- * origin only when it is another site), status and duration — never headers or
- * bodies — and Epic's own `/api/epic/replay/*` traffic is never recorded.
+ * origin only when it is another site), status, duration and the trace id of
+ * the request (never any other header) — never bodies — and Epic's own `/api/epic/replay/*` traffic is never recorded.
  *
  * The page's own calls behave exactly as before: every wrapper calls the
  * original with the same arguments and returns its result, and recording
@@ -55,6 +56,8 @@ export function createReplayDiagnostics(
   now: () => number = () => Date.now(),
   // Checked before a payload is built, so a page that is not being recorded pays nothing per call.
   isRecording: () => boolean = () => true,
+  // Where a request's trace id comes from; the header it carries is the fallback.
+  tracing?: Pick<ReplayTracing, "getLastTraceId" | "issuedCount" | "traceIdOfXhr">,
 ) {
   let started = false;
   let emitting = false;
@@ -130,14 +133,20 @@ export function createReplayDiagnostics(
         const startedAt = performance.now();
         const method = (init?.method ?? (input instanceof Request ? input.method : "GET")) || "GET";
         const url = input instanceof Request ? input.url : String(input);
+        const issuedBefore = tracing?.issuedCount() ?? 0;
+        const pending = originalFetch.call(this, input, init);
+        // The call above runs synchronously through any tracing wrapper, which is
+        // how a header added by one installed around this one is still seen.
+        const traceId =
+          tracing && tracing.issuedCount() > issuedBefore ? tracing.getLastTraceId() : requestTraceId(input, init);
         // Re-thrown on failure, so a fetch the page leaves unhandled still reaches `unhandledrejection`.
-        return originalFetch.call(this, input, init).then(
+        return pending.then(
           (response) => {
-            recordRequest(method, url, response.status, performance.now() - startedAt);
+            recordRequest(method, url, response.status, performance.now() - startedAt, traceId);
             return response;
           },
           (error: unknown) => {
-            recordRequest(method, url, 0, performance.now() - startedAt);
+            recordRequest(method, url, 0, performance.now() - startedAt, traceId);
             throw error;
           },
         );
@@ -162,7 +171,14 @@ export function createReplayDiagnostics(
           const startedAt = performance.now();
           this.addEventListener(
             "loadend",
-            () => recordRequest(request.method, request.url, this.status, performance.now() - startedAt),
+            () =>
+              recordRequest(
+                request.method,
+                request.url,
+                this.status,
+                performance.now() - startedAt,
+                tracing?.traceIdOfXhr(this) ?? null,
+              ),
             { once: true },
           );
         }
@@ -181,13 +197,30 @@ export function createReplayDiagnostics(
     };
   }
 
-  function recordRequest(method: string, url: string, status: number, durationMs: number) {
+  function requestTraceId(input: RequestInfo | URL, init?: RequestInit): string | null {
+    try {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      return traceIdOf(headers.get("traceparent"));
+    } catch {
+      return null;
+    }
+  }
+
+  function recordRequest(method: string, url: string, status: number, durationMs: number, traceId: string | null) {
     try {
       const raw = diagnosticPath(url);
       if (!raw || !isReplayDiagnosticUrlAllowed(raw)) return;
       if (FRAMEWORK_PATHS.some((prefix) => raw.startsWith(prefix))) return;
       const path = redactPath(raw);
-      emit("network", NETWORK_TAG, () => sanitizeNetworkDiagnostic({ method, url: path, status, durationMs }));
+      emit("network", NETWORK_TAG, () =>
+        sanitizeNetworkDiagnostic({
+          method,
+          url: path,
+          status,
+          durationMs,
+          ...(traceId && TRACE_ID_PATTERN.test(traceId) ? { traceId } : {}),
+        }),
+      );
     } catch {
       // A URL the page could fetch but we cannot parse is simply not recorded.
     }

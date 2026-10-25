@@ -126,7 +126,7 @@ describe("ReadReplayConfig", () => {
       [async () => new Response(null, { status: 401 }), "unauthorized"],
       [async () => new Response(null, { status: 503 }), "upstream_unavailable"],
       [async () => { throw new DOMException("timed out", "TimeoutError"); }, "upstream_unavailable"],
-      [fixture({ contractVersion: 2 }), "invalid_policy"],
+      [fixture({ contractVersion: 1 }), "invalid_policy"],
       [fixture({ projectId: "other" }), "invalid_policy"],
       [fixture({ environment: "production" }), "invalid_policy"],
       [
@@ -245,7 +245,7 @@ describe("ReadReplayConfig", () => {
     stubEpicEnv();
     const valid = await readAfresh();
     expect(valid.recording).toEqual({
-      transport: "epic-http",
+      transport: "otlp-relay",
       limits: {
         maxBatchBytes: 1_048_576,
         maxBatchEvents: 500,
@@ -254,6 +254,7 @@ describe("ReadReplayConfig", () => {
         flushIntervalMs: 20_000,
         flushBytes: 65_536,
         maxAttempts: 3,
+        maxChunkBytes: 972_800,
       },
     });
 

@@ -71,8 +71,8 @@ function statusOf(pipeline: ReplayPipelineState | null, identity: Identity, arme
  * every failure only changes `useEpicReplay()`.
  *
  * `release` is the immutable build identity of this document, taken from the
- * server-rendered root layout. It is frozen into each registration and never
- * replaced by a later policy refresh.
+ * server-rendered root layout. It is sent as `service.version` on every record
+ * and never replaced by a later policy refresh.
  */
 export function EpicReplayProvider({
   release = null,
@@ -161,7 +161,8 @@ export function EpicReplayProvider({
       upload: pipelineState?.upload ?? null,
       evidence: "unverified",
       reporting: { enabled: reportingEnabled },
-      getRecordingReference: () => pipelineRef.current?.getRecordingReference() ?? null,
+      getSessionReference: () => pipelineRef.current?.getSessionReference() ?? null,
+      flush: () => pipelineRef.current?.flush().catch(() => undefined) ?? Promise.resolve(),
       event: (name, payload) =>
         pipelineRef.current?.event(name, payload) ?? { recorded: false, reason: "not_recording" },
     };

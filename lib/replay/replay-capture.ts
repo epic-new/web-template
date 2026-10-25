@@ -330,6 +330,25 @@ export function createReplayCaptureSession({
       }
     },
 
+    /**
+     * Whether evidence that does not depend on the replay (behavior markers,
+     * browser errors) may be sent right now: every gate except sampling, so a
+     * session left unrecorded by the sampler still reports what happened.
+     */
+    allowsEvidence(): boolean {
+      if (!started) return false;
+      try {
+        return evaluateCapturePermission({
+          policy: getPolicy(),
+          consent: consent.getSnapshot(),
+          pathname: normalizeReplayPath(getPathname()),
+          sampled: () => true,
+        }).allowed;
+      } catch {
+        return false;
+      }
+    },
+
     /** Re-evaluates now, e.g. after the policy source was swapped. */
     refresh(): void {
       failed = false;

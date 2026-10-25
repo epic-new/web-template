@@ -2,102 +2,99 @@ import { EventType, type eventWithTime } from "@rrweb/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { REPLAY_RECORDING_LIMITS, type PublicReplayConfig } from "../replay-config.contract";
+import { EVIDENCE_EVENTS, type OtlpLogRecord, type OtlpLogsRequest } from "../replay-otlp";
+import { createReplaySessionStore, REPLAY_SESSION_IDLE_MS, type ReplaySessionStore } from "../replay-session";
 import { createReplayUploader, type ReplayUploader } from "../replay-uploader";
 
 const T = 1_800_000_000_000;
-const RECORDING_ID = "0a1b2c3d-1b0e-4d6f-9a52-2f1b9d9d1c11";
-const FIRST_TOKEN = `eprc_1.${"1".repeat(60)}`;
 
 const meta = (timestamp = T): eventWithTime =>
   ({ type: EventType.Meta, timestamp, data: { href: "http://app.test/checkout?token=1#frag", width: 390, height: 844 } }) as eventWithTime;
 const snapshot = (timestamp = T + 1): eventWithTime =>
   ({ type: EventType.FullSnapshot, timestamp, data: { node: {}, initialOffset: { left: 0, top: 0 } } }) as unknown as eventWithTime;
-const custom = (timestamp: number): eventWithTime =>
-  ({ type: EventType.Custom, timestamp, data: { tag: "epic.test", payload: {} } }) as eventWithTime;
+const custom = (timestamp: number, payload: unknown = {}): eventWithTime =>
+  ({ type: EventType.Custom, timestamp, data: { tag: "epic.test", payload } }) as eventWithTime;
 
-type Logged = { path: string; body: Record<string, unknown> };
+class MemoryStorage {
+  private values = new Map<string, string>();
+  getItem(key: string) {
+    return this.values.get(key) ?? null;
+  }
+  setItem(key: string, value: string) {
+    this.values.set(key, value);
+  }
+  removeItem(key: string) {
+    this.values.delete(key);
+  }
+}
 
-// A synthetic stand-in for the app relay answering with Epic's EPI-210 shapes.
+let counter = 0;
+const randomBytes = (length: number) => new Uint8Array(length).fill(++counter);
+
+function sessionStore(storage = new MemoryStorage()): ReplaySessionStore {
+  return createReplaySessionStore({ storage: storage as unknown as Storage, now: () => Date.now(), randomBytes });
+}
+
+const attr = (record: OtlpLogRecord, key: string) => record.attributes.find((entry) => entry.key === key)?.value.stringValue;
+const recordsOf = (request: OtlpLogsRequest) =>
+  request.resourceLogs.flatMap((resource) => resource.scopeLogs.flatMap((scope) => scope.logRecords));
+
+type Logged = { path: string; body: OtlpLogsRequest; keepalive: boolean | undefined };
+
+// A synthetic stand-in for the app relay answering the way Epic's ingest does.
 function createFixture() {
   const log: Logged[] = [];
-  const mode = { registration: null as Promise<void> | null, batch: "accept" as string, expireBefore: -1, limited: false };
-  let token = 1;
-  let expired = false;
+  const mode = { reply: "accept" as string, once: false };
 
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   const error = (code: string, status: number, extra: Record<string, unknown> = {}) =>
     json({ contractVersion: 1, error: "x", code, ...extra }, status);
-  const recording = () => ({
-    contractVersion: 1,
-    recordingId: RECORDING_ID,
-    recordingToken: `eprc_1.${String(token).repeat(60)}`,
-    tokenExpiresAt: T + 900_000,
-    startedAt: T,
-    availability: "waiting_for_events",
-    limits: REPLAY_RECORDING_LIMITS,
-  });
 
   const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const path = String(input).replace("/api/epic/replay", "");
-    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    log.push({ path, body });
-
-    if (path === "/identity") return json({ contractVersion: 1 });
-    if (path === "/recordings") {
-      await mode.registration;
-      return json(recording(), 201);
-    }
-    if (path.endsWith("/capability")) {
-      token += 1;
-      expired = false;
-      return json(recording());
-    }
-    if (body.sequence === mode.expireBefore && !expired && body.recordingToken === FIRST_TOKEN) {
-      expired = true;
-      return error("capability_expired", 401);
-    }
-    if (mode.batch === "fail_503") return error("unavailable", 503);
-    if (mode.batch === "closed" && body.sequence === 1) return error("recording_closed", 409);
-    if (mode.batch === "rate_limited_once" && !mode.limited) {
-      mode.limited = true;
+    log.push({
+      path: String(input).replace("/api/epic/replay", ""),
+      body: JSON.parse(String(init?.body)) as OtlpLogsRequest,
+      keepalive: init?.keepalive,
+    });
+    if (mode.reply === "fail_503") return error("unavailable", 503);
+    if (mode.reply === "capture_disabled") return error("capture_disabled", 403);
+    if (mode.reply === "too_large") return error("payload_too_large", 413);
+    if (mode.reply === "rate_limited_once" && !mode.once) {
+      mode.once = true;
       return error("rate_limited", 429, { retryAfterMs: 3_000 });
     }
-    if (mode.batch === "lost_ack_once" && !mode.limited) {
-      mode.limited = true;
+    if (mode.reply === "lost_ack_once" && !mode.once) {
+      mode.once = true;
       throw new TypeError("network");
     }
-    return json({
-      contractVersion: 1,
-      recordingId: RECORDING_ID,
-      batchId: body.batchId,
-      sequence: body.sequence,
-      delivery: "accepted",
-    });
+    return json({ partialSuccess: {} });
   });
 
-  return { fetchFn, log, mode, batches: () => log.filter((entry) => entry.path.endsWith("/batches")) };
+  return { fetchFn, log, mode };
 }
 
-function setup(limits: PublicReplayConfig["recording"]["limits"] = { ...REPLAY_RECORDING_LIMITS }, random = () => 0) {
+function setup(
+  limits: PublicReplayConfig["recording"]["limits"] = { ...REPLAY_RECORDING_LIMITS },
+  { random = () => 0, sessions = sessionStore() }: { random?: () => number; sessions?: ReplaySessionStore } = {},
+) {
   const fixture = createFixture();
   const onRecordingLost = vi.fn();
   const uploader: ReplayUploader = createReplayUploader({
     getLimits: () => limits,
-    getConfigVersion: () => "3",
     getDocumentRelease: () => "build-a",
+    sessions,
     fetch: fixture.fetchFn as unknown as typeof fetch,
     monotonicNow: () => Date.now(),
     isOnline: () => true,
-    getViewport: () => ({ width: 390, height: 844 }),
-    getPathname: () => "/checkout",
     random,
     onRecordingLost,
   });
-  return { fixture, uploader, onRecordingLost };
+  return { fixture, uploader, onRecordingLost, sessions };
 }
 
 const settle = (ms = 100) => vi.advanceTimersByTimeAsync(ms);
+const INTERVAL = REPLAY_RECORDING_LIMITS.flushIntervalMs + 100;
 
 describe("createReplayUploader", () => {
   beforeEach(() => {
@@ -107,241 +104,334 @@ describe("createReplayUploader", () => {
     vi.useRealTimers();
   });
 
-  it("registers before uploading and sends the buffered events in order", async () => {
+  it("sends events as ClickStack log records in order, under one session id", async () => {
     const { fixture, uploader } = setup();
-    let release!: () => void;
-    fixture.mode.registration = new Promise<void>((resolve) => (release = resolve));
-
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
-    for (const offset of [2, 3, 4]) uploader.push(custom(T + offset), 1);
+    for (const offset of [2, 3]) uploader.push(custom(T + offset), 1);
     await settle();
+    expect(fixture.log).toHaveLength(0);
 
-    expect(uploader.getState()).toMatchObject({ status: "recorder_started", current: null, evidence: "unverified" });
-    expect(fixture.batches()).toHaveLength(0);
+    await settle(INTERVAL);
+    expect(fixture.log).toHaveLength(1);
+    const [{ path, body }] = fixture.log;
+    expect(path).toBe("/telemetry");
 
-    release();
-    await settle();
+    const resource = body.resourceLogs[0]!.resource.attributes;
+    const sessionId = resource.find((entry) => entry.key === "rum.sessionId")!.value.stringValue;
+    expect(sessionId).toMatch(/^[0-9a-f]{32}$/);
+    expect(resource.find((entry) => entry.key === "service.version")!.value.stringValue).toBe("build-a");
+    expect(body.resourceLogs[0]!.scopeLogs.map((scope) => scope.scope.name)).toEqual(["rum.rr-web"]);
 
-    const [first] = fixture.batches();
-    expect(first!.body).toMatchObject({ sequence: 0, final: false });
-    expect((first!.body.events as eventWithTime[]).map((event) => event.timestamp)).toEqual([T, T + 1, T + 2, T + 3, T + 4]);
-    // Epic rejects a Meta href with a query or fragment.
-    expect(((first!.body.events as eventWithTime[])[0]!.data as { href: string }).href).toBe("http://app.test/checkout");
-    expect(fixture.log.find((entry) => entry.path === "/recordings")!.body).toMatchObject({
-      startedAt: T,
-      route: "/checkout",
-      release: "build-a",
-      configVersion: "3",
-      viewport: { width: 390, height: 844 },
-    });
-    expect(uploader.getState()).toMatchObject({
-      status: "pending",
-      current: { recordingId: RECORDING_ID, startedAt: T, boundary: 1 },
-    });
+    const records = recordsOf(body);
+    expect(records.map((record) => record.timeUnixNano)).toEqual([T, T + 1, T + 2, T + 3].map((ms) => `${ms}000000`));
+    expect(records.map((record) => attr(record, "rr-web.offset"))).toEqual(["0", "1", "2", "3"]);
+    expect(records.map((record) => attr(record, "rr-web.event"))).toEqual(["0", "1", "2", "3"]);
+    expect(records.map((record) => attr(record, "rr-web.chunk"))).toEqual(["1", "1", "1", "1"]);
+    expect(records.map((record) => attr(record, "rr-web.total-chunks"))).toEqual(["1", "1", "1", "1"]);
+
+    const first = JSON.parse(records[0]!.body.stringValue) as { type: number; data: { href: string } };
+    expect(Object.keys(first)[0]).toBe("type");
+    // A query or fragment can carry tokens; the recording keeps the path.
+    expect(first.data.href).toBe("http://app.test/checkout");
   });
 
-  it("never sends subject or Epic ids from the browser", async () => {
+  it("never sends subject, Epic ids or scope attributes from the browser", async () => {
     const { fixture, uploader } = setup();
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
+    uploader.flushNow();
     await settle();
 
     const text = JSON.stringify(fixture.log);
-    for (const field of ["subjectId", "projectId", "applicationId", "environment", "captureContext"]) {
-      expect(text).not.toContain(`"${field}"`);
+    for (const field of ["subjectId", "epic.subject.id", "epic.project.id", "epic.application.id", "deployment.environment.name", "service.name"]) {
+      expect(text).not.toContain(field);
     }
   });
 
-  it("keeps one request in flight and numbers batches in order", async () => {
-    const limits = { ...REPLAY_RECORDING_LIMITS, maxBatchEvents: 500 };
-    const { fixture, uploader } = setup(limits);
-    uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
-    for (let index = 0; index < 1_200; index++) uploader.push(custom(T + 2 + index), 1);
-    await settle(40_000);
-
-    expect(fixture.batches().map((entry) => entry.body.sequence)).toEqual([0, 1, 2]);
-  });
-
-  it("renews an expired capability and resends the identical batch", async () => {
-    const { fixture, uploader } = setup();
-    fixture.mode.expireBefore = 0;
-    uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
+  it("splits an event larger than maxChunkBytes on character boundaries", async () => {
+    const maxChunkBytes = 200;
+    const { fixture, uploader } = setup({ ...REPLAY_RECORDING_LIMITS, maxChunkBytes });
+    const text = "ação 😀 ".repeat(120);
+    uploader.push(custom(T, { text }), 1);
+    uploader.flushNow();
     await settle();
 
-    const batches = fixture.batches();
-    expect(fixture.log.filter((entry) => entry.path.endsWith("/capability"))).toHaveLength(1);
-    expect(batches).toHaveLength(2);
-    expect({ ...batches[1]!.body, recordingToken: undefined }).toEqual({ ...batches[0]!.body, recordingToken: undefined });
-    expect(batches[0]!.body.recordingToken).not.toBe(batches[1]!.body.recordingToken);
-    expect(uploader.getState().status).toBe("pending");
+    const records = recordsOf(fixture.log[0]!.body);
+    expect(records.length).toBeGreaterThan(1);
+    const encoder = new TextEncoder();
+    for (const [index, record] of records.entries()) {
+      expect(encoder.encode(record.body.stringValue).length).toBeLessThanOrEqual(maxChunkBytes);
+      expect(attr(record, "rr-web.chunk")).toBe(String(index + 1));
+      expect(attr(record, "rr-web.total-chunks")).toBe(String(records.length));
+      expect(attr(record, "rr-web.event")).toBe("0");
+      expect(attr(record, "rr-web.offset")).toBe(String(index));
+      expect(record.timeUnixNano).toBe(`${T}000000`);
+    }
+    const joined = records.map((record) => record.body.stringValue).join("");
+    expect(joined).toBe(JSON.stringify(custom(T, { text })));
+    expect(joined).not.toContain("�");
+  });
+
+  it("keeps one request under maxBatchBytes of event bytes, in order", async () => {
+    const limits = { ...REPLAY_RECORDING_LIMITS, maxBatchBytes: 4_000, flushBytes: 1_000 };
+    const { fixture, uploader } = setup(limits);
+    for (let index = 0; index < 20; index++) uploader.push(custom(T + index, { text: "x".repeat(500) }), 1);
+    await settle(10_000);
+
+    const batches = fixture.log.map((entry) => recordsOf(entry.body));
+    expect(batches.length).toBeGreaterThan(1);
+    for (const batch of batches) {
+      expect(batch.reduce((total, record) => total + record.body.stringValue.length, 0)).toBeLessThanOrEqual(4_000);
+    }
+    expect(batches.flat().map((record) => attr(record, "rr-web.offset"))).toEqual(
+      Array.from({ length: 20 }, (_, index) => String(index)),
+    );
+  });
+
+  it("sends evidence as its own scope, whatever the replay is doing", async () => {
+    const { fixture, uploader } = setup();
+    uploader.pushEvidence({
+      event: EVIDENCE_EVENTS.behaviorFailed,
+      at: T,
+      route: "/checkout",
+      body: "behavior.failed pay",
+      behaviorName: "pay",
+      occurrence: "occ-1",
+    });
+    uploader.flushNow();
+    await settle();
+
+    const [{ body }] = fixture.log;
+    expect(body.resourceLogs[0]!.scopeLogs.map((scope) => scope.scope.name)).toEqual(["epic.evidence"]);
+    const [record] = recordsOf(body);
+    expect(attr(record!, "epic.event")).toBe("behavior.failed");
+    expect(attr(record!, "epic.behavior.name")).toBe("pay");
+    expect(attr(record!, "epic.behavior.occurrence")).toBe("occ-1");
+    expect(attr(record!, "epic.route")).toBe("/checkout");
+    expect(record!.body.stringValue).toBe("behavior.failed pay");
+    expect(attr(record!, "rr-web.offset")).toBeUndefined();
+  });
+
+  it("continues the same session and offsets after a reload within the idle window", async () => {
+    const storage = new MemoryStorage();
+    const first = setup(undefined, { sessions: sessionStore(storage) });
+    first.uploader.push(meta(), 1);
+    first.uploader.push(snapshot(), 1);
+    first.uploader.flushNow();
+    await settle();
+    first.uploader.dispose();
+
+    await settle(60_000);
+    const second = setup(undefined, { sessions: sessionStore(storage) });
+    second.uploader.push(meta(T + 60_000), 1);
+    second.uploader.push(snapshot(T + 60_001), 1);
+    second.uploader.flushNow();
+    await settle();
+
+    const id = (log: Logged[]) => log[0]!.body.resourceLogs[0]!.resource.attributes[0]!.value.stringValue;
+    expect(id(second.fixture.log)).toBe(id(first.fixture.log));
+    expect(recordsOf(second.fixture.log[0]!.body).map((record) => attr(record, "rr-web.offset"))).toEqual(["2", "3"]);
+  });
+
+  it("asks for a fresh boundary once the session has gone idle", async () => {
+    const { fixture, uploader, onRecordingLost } = setup();
+    uploader.push(meta(), 1);
+    uploader.push(snapshot(), 1);
+    uploader.flushNow();
+    await settle();
+    const before = fixture.log.length;
+
+    await settle(REPLAY_SESSION_IDLE_MS + 1_000);
+    uploader.push(custom(T + REPLAY_SESSION_IDLE_MS + 1_000), 1);
+    uploader.push(custom(T + REPLAY_SESSION_IDLE_MS + 1_001), 1);
+    uploader.flushNow();
+    await settle(INTERVAL);
+
+    expect(onRecordingLost).toHaveBeenCalledTimes(1);
+    expect(onRecordingLost).toHaveBeenCalledWith("session_rotated");
+    expect(fixture.log).toHaveLength(before);
+
+    uploader.push(meta(T + REPLAY_SESSION_IDLE_MS + 2_000), 2);
+    uploader.push(snapshot(T + REPLAY_SESSION_IDLE_MS + 2_001), 2);
+    uploader.flushNow();
+    await settle();
+    const ids = fixture.log.map((entry) => entry.body.resourceLogs[0]!.resource.attributes[0]!.value.stringValue);
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).not.toBe(ids[0]);
+    expect(recordsOf(fixture.log[1]!.body).map((record) => attr(record, "rr-web.offset"))).toEqual(["0", "1"]);
   });
 
   it("stops after exactly maxAttempts of the same batch", async () => {
     const { fixture, uploader, onRecordingLost } = setup();
-    fixture.mode.batch = "fail_503";
+    fixture.mode.reply = "fail_503";
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
+    uploader.flushNow();
     await settle(10_000);
 
-    const batches = fixture.batches();
-    expect(batches).toHaveLength(3);
-    expect(new Set(batches.map((entry) => entry.body.batchId)).size).toBe(1);
+    expect(fixture.log).toHaveLength(3);
+    expect(new Set(fixture.log.map((entry) => JSON.stringify(entry.body))).size).toBe(1);
     expect(uploader.getState()).toMatchObject({ status: "unavailable", reason: "attempts_exhausted", bufferedEvents: 0 });
     expect(onRecordingLost).toHaveBeenCalledWith("attempts_exhausted");
+    expect(uploader.shouldRestart("attempts_exhausted")).toBe(true);
   });
 
-  it("abandons a closed recording and sends nothing more for it", async () => {
+  it("stops for good on capture_disabled and sends nothing more until resumed", async () => {
     const { fixture, uploader, onRecordingLost } = setup();
-    fixture.mode.batch = "closed";
+    fixture.mode.reply = "capture_disabled";
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
+    uploader.flushNow();
     await settle();
-    uploader.push(custom(T + 2), 1);
-    await settle(21_000);
-    const sent = fixture.log.length;
-    uploader.push(custom(T + 3), 1);
-    await settle(21_000);
+    expect(onRecordingLost).toHaveBeenCalledWith("capture_disabled");
+    expect(uploader.shouldRestart("capture_disabled")).toBe(false);
 
+    const sent = fixture.log.length;
+    uploader.push(custom(T + 2), 1);
+    uploader.pushEvidence({ event: EVIDENCE_EVENTS.browserError, at: T, route: "/", body: "Error: x" });
+    uploader.flushNow();
+    await settle(INTERVAL);
     expect(fixture.log).toHaveLength(sent);
-    expect(uploader.getState().history[0]).toMatchObject({ outcome: "incomplete", acceptedBatches: 1 });
-    expect(onRecordingLost).toHaveBeenCalledWith("recording_closed");
+
+    fixture.mode.reply = "accept";
+    uploader.resume();
+    uploader.pushEvidence({ event: EVIDENCE_EVENTS.browserError, at: T, route: "/", body: "Error: x" });
+    uploader.flushNow();
+    await settle();
+    expect(fixture.log).toHaveLength(sent + 1);
+  });
+
+  it("stops without retrying on payload_too_large", async () => {
+    const { fixture, uploader, onRecordingLost } = setup();
+    fixture.mode.reply = "too_large";
+    uploader.push(meta(), 1);
+    uploader.flushNow();
+    await settle(10_000);
+
+    expect(fixture.log).toHaveLength(1);
+    expect(onRecordingLost).toHaveBeenCalledWith("payload_too_large");
   });
 
   it("retries the identical batch after a lost answer", async () => {
     const { fixture, uploader } = setup();
-    fixture.mode.batch = "lost_ack_once";
+    fixture.mode.reply = "lost_ack_once";
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
+    uploader.flushNow();
     await settle(2_000);
 
-    const batches = fixture.batches();
-    expect(batches).toHaveLength(2);
-    expect(batches[1]!.body).toEqual(batches[0]!.body);
-    expect(uploader.getState()).toMatchObject({ status: "pending" });
+    expect(fixture.log).toHaveLength(2);
+    expect(fixture.log[1]!.body).toEqual(fixture.log[0]!.body);
+    expect(uploader.getState()).toMatchObject({ status: "idle", acceptedBatches: 1 });
   });
 
   it("waits retryAfterMs after rate_limited, then resends the same batch", async () => {
     const { fixture, uploader } = setup();
-    fixture.mode.batch = "rate_limited_once";
+    fixture.mode.reply = "rate_limited_once";
     uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
+    uploader.flushNow();
     await settle(1_000);
-    expect(fixture.batches()).toHaveLength(1);
+    expect(fixture.log).toHaveLength(1);
 
     await settle(3_000);
-    const batches = fixture.batches();
-    expect(batches).toHaveLength(2);
-    expect(batches[1]!.body.batchId).toBe(batches[0]!.body.batchId);
-  });
-
-  it("restarts a fresh recording after every attempt failed", async () => {
-    const { fixture, uploader, onRecordingLost } = setup();
-    fixture.mode.batch = "fail_503";
-    uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
-    await settle(10_000);
-
-    expect(onRecordingLost).toHaveBeenCalledWith("attempts_exhausted");
-    expect(uploader.shouldRestart("attempts_exhausted")).toBe(true);
+    expect(fixture.log).toHaveLength(2);
+    expect(fixture.log[1]!.body).toEqual(fixture.log[0]!.body);
   });
 
   it("sends a batch once flushBytes are queued, before the interval", async () => {
     const { fixture, uploader } = setup({ ...REPLAY_RECORDING_LIMITS, flushBytes: 2_000 });
     uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
     await settle();
-    expect(fixture.batches()).toHaveLength(1);
+    expect(fixture.log).toHaveLength(0);
 
-    uploader.push({ ...custom(T + 2), data: { tag: "epic.test", payload: { text: "x".repeat(2_500) } } } as eventWithTime, 1);
+    uploader.push(custom(T + 2, { text: "x".repeat(2_500) }), 1);
     await settle();
-    expect(fixture.batches().map((entry) => entry.body.sequence)).toEqual([0, 1]);
+    expect(fixture.log).toHaveLength(1);
   });
 
-  it("holds small batches until flushIntervalMs, and flushNow sends them at once", async () => {
+  it("sends a hidden-tab flush as keepalive, and a large one without it", async () => {
+    const { fixture, uploader } = setup();
+    uploader.push(meta(), 1);
+    uploader.flushNow();
+    await settle();
+    expect(fixture.fetchFn.mock.calls.at(-1)![1]?.keepalive).toBe(true);
+
+    uploader.push(custom(T + 2, { text: "x".repeat(80_000) }), 1);
+    uploader.flushNow();
+    await settle();
+    expect(fixture.fetchFn.mock.calls.at(-1)![1]?.keepalive).toBe(false);
+  });
+
+  it("closeForUnload sends what is queued as one keepalive request", async () => {
     const { fixture, uploader } = setup();
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
+    uploader.closeForUnload();
     await settle();
-    uploader.push(custom(T + 2), 1);
-    await settle(10_000);
-    expect(fixture.batches()).toHaveLength(1);
 
-    uploader.flushNow();
-    await settle();
-    const batches = fixture.batches();
-    expect(batches).toHaveLength(2);
-    expect(batches[1]!.body).toMatchObject({ sequence: 1, final: false });
+    expect(fixture.log).toHaveLength(1);
+    expect(fixture.fetchFn.mock.calls[0]![1]?.keepalive).toBe(true);
+    expect(uploader.getState().bufferedEvents).toBe(0);
   });
 
-  it("sends a hidden-tab flush as keepalive without closing the recording", async () => {
-    const { fixture, uploader } = setup();
-    uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
-    await settle();
-    uploader.push(custom(T + 2), 1);
-    uploader.flushNow();
-    await settle();
-
-    const last = fixture.fetchFn.mock.calls.at(-1)!;
-    expect(last[1]?.keepalive).toBe(true);
-    expect(uploader.getState().history[0]!.outcome).toBe("open");
-  });
-
-  it("fails explicitly when a snapshot cannot fit one batch", async () => {
+  it("fails explicitly when one record cannot fit a batch", async () => {
     const { fixture, uploader } = setup({ ...REPLAY_RECORDING_LIMITS, maxBatchBytes: 2_048 });
     uploader.push(meta(), 1);
     uploader.push(
       { ...snapshot(), data: { node: { text: "x".repeat(4_000) }, initialOffset: { left: 0, top: 0 } } } as unknown as eventWithTime,
       1,
     );
+    uploader.flushNow();
     await settle();
 
-    expect(fixture.batches()).toHaveLength(0);
-    expect(fixture.log.some((entry) => entry.path === "/recordings")).toBe(true);
+    expect(fixture.log.length).toBeLessThanOrEqual(1);
     expect(uploader.getState()).toMatchObject({ status: "unavailable", reason: "snapshot_too_large" });
   });
 
-  it("drops queued events on clear and keeps the earlier reference", async () => {
+  it("drops queued events on clear, synchronously", async () => {
     const { fixture, uploader } = setup();
     uploader.push(meta(), 1);
     uploader.push(snapshot(), 1);
-    await settle();
-    uploader.push(custom(T + 2), 1);
     uploader.clear();
-    const sent = fixture.log.length;
-    await settle(10_000);
+    expect(uploader.getState().bufferedEvents).toBe(0);
+    await settle(INTERVAL);
 
-    expect(fixture.log).toHaveLength(sent);
-    expect(uploader.getState()).toMatchObject({ status: "idle", bufferedEvents: 0, current: null });
-    expect(uploader.getState().history[0]!.reference.recordingId).toBe(RECORDING_ID);
+    expect(fixture.log).toHaveLength(0);
+    expect(uploader.getState()).toMatchObject({ status: "idle", bufferedEvents: 0 });
   });
 
-  it("registers a new recording for a new boundary with its own key", async () => {
+  it("flush resolves once what was queued has been sent", async () => {
     const { fixture, uploader } = setup();
     uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
+    let done = false;
+    void uploader.flush().then(() => (done = true));
     await settle();
-    uploader.push(meta(T + 10_000), 2);
-    uploader.push(snapshot(T + 10_001), 2);
-    await settle(10_000);
 
-    const keys = fixture.log.filter((entry) => entry.path === "/recordings").map((entry) => entry.body.idempotencyKey);
-    expect(keys).toHaveLength(2);
-    expect(keys[0]).not.toBe(keys[1]);
+    expect(done).toBe(true);
+    expect(fixture.log).toHaveLength(1);
+  });
+
+  it("reports the session it sent for, only while that session is live", async () => {
+    const { uploader } = setup();
+    expect(uploader.getReference()).toBeNull();
+    uploader.push(meta(), 1);
+    expect(uploader.getReference()).toMatchObject({ startedAt: T, boundary: 1 });
+    expect(uploader.getReference()!.sessionId).toMatch(/^[0-9a-f]{32}$/);
+
+    await settle(REPLAY_SESSION_IDLE_MS + 1_000);
+    expect(uploader.getReference()).toBeNull();
   });
 
   it("spreads a retry past the base backoff and never beyond one and a half times it", async () => {
-    const { fixture, uploader } = setup({ ...REPLAY_RECORDING_LIMITS }, () => 0.999);
-    fixture.mode.batch = "lost_ack_once";
+    const { fixture, uploader } = setup({ ...REPLAY_RECORDING_LIMITS }, { random: () => 0.999 });
+    fixture.mode.reply = "lost_ack_once";
     uploader.push(meta(), 1);
-    uploader.push(snapshot(), 1);
+    uploader.flushNow();
     await settle(600);
-    expect(fixture.batches()).toHaveLength(1);
+    expect(fixture.log).toHaveLength(1);
 
     await settle(200);
-    expect(fixture.batches()).toHaveLength(2);
+    expect(fixture.log).toHaveLength(2);
   });
 });

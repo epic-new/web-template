@@ -34,6 +34,20 @@ describe("evaluateCapturePermission", () => {
     expect(evaluateCapturePermission({ ...allowed, ...override })).toEqual({ allowed: false, reason });
   });
 
+  it("treats an unanswered prompt as consent where it is not required, but never an opt-out", () => {
+    const optional = activeReplayPolicy({ consentMode: "not_required" });
+
+    expect(evaluateCapturePermission({ ...allowed, policy: optional, consent: "unknown" })).toEqual({ allowed: true });
+    expect(evaluateCapturePermission({ ...allowed, policy: optional, consent: "withdrawn" })).toEqual({
+      allowed: false,
+      reason: "consent_withdrawn",
+    });
+    expect(evaluateCapturePermission({ ...allowed, consent: "unknown" })).toEqual({
+      allowed: false,
+      reason: "consent_absent",
+    });
+  });
+
   it("does not draw a sample before consent or on an excluded route", () => {
     const sampled = vi.fn(() => true);
 

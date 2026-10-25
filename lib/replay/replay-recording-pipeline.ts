@@ -6,9 +6,10 @@ import {
 import { replayLifecycle } from "./replay-lifecycle";
 import { createReplayDiagnostics } from "./replay-diagnostics";
 import { createReplayMarkers, type ReplayEventResult } from "./replay-markers";
+import { createReplayTracing } from "./replay-tracing";
 import {
   createReplayUploader,
-  type ReplayRecordingReference,
+  type ReplaySessionReference,
   type ReplayUploaderOptions,
   type ReplayUploadReason,
   type ReplayUploadState,
@@ -16,16 +17,26 @@ import {
 
 /**
  * One capture session wired to one uploader: the real recorder, gates and
- * redaction feeding the verified-ownership transport. The root provider owns
- * the only instance in a tab.
+ * redaction feeding the OTLP transport. The root provider owns the only
+ * instance in a tab.
  *
- * When the transport loses a recording (a batch that stayed unanswered after
- * its attempts, a closed recording, buffer overrun) the pipeline starts a fresh
- * boundary with a new registration and a new FullSnapshot, at most
- * `maxAttempts` times. The budget comes back only after a recording uploads
- * enough batches to prove it works, so a stream that fails right after its
- * first batch cannot loop through registrations forever.
+ * Behavior markers and browser errors also leave as plain evidence records
+ * whenever every gate except sampling passes, so a session the sampler left
+ * unrecorded still says what happened in it.
+ *
+ * When the transport loses what it holds (a batch that stayed unanswered after
+ * its attempts, a buffer overrun) the pipeline starts a fresh boundary with a
+ * new FullSnapshot, at most `maxAttempts` times. The budget comes back only
+ * after a boundary uploads enough batches to prove it works, so a stream that
+ * fails right after its first batch cannot loop forever. A session that went
+ * idle or reached its maximum age restarts the boundary without spending it.
  */
+
+export interface ReplaySessionEvidence extends Pick<ReplaySessionReference, "sessionId" | "startedAt"> {
+  traceId?: string;
+  behaviorId?: string;
+  occurrenceId?: string;
+}
 
 export interface ReplayPipelineState {
   capture: ReplayCaptureState;
@@ -35,13 +46,13 @@ export interface ReplayPipelineState {
 }
 
 export interface ReplayRecordingPipelineOptions
-  extends Omit<ReplayUploaderOptions, "getLimits" | "getConfigVersion" | "onRecordingLost">,
+  extends Omit<ReplayUploaderOptions, "getLimits" | "onRecordingLost">,
     Omit<ReplayCaptureSessionOptions, "sink" | "onNavigate"> {
   /** Defaults to the effective policy of `replayLifecycle`. */
   getPolicy?: NonNullable<ReplayCaptureSessionOptions["getPolicy"]>;
 }
 
-// A recording must upload this many batches before the budget refills.
+// A boundary must upload this many batches before the budget refills.
 const RECOVERY_BATCHES = 2;
 // Failures that no fresh recording can fix; capture stops until policy changes.
 // After an outage every client fails its attempts together; a fresh recording
@@ -58,6 +69,8 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
   let restartsExhausted = false;
   let started = false;
   let stoppedAtConfig: string | null | undefined;
+  // Batches accepted before the current boundary started, so credit counts only its own.
+  let acceptedBaseline = 0;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let state: ReplayPipelineState;
   const listeners = new Set<() => void>();
@@ -66,11 +79,17 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
   const uploader = createReplayUploader({
     ...rest,
     getLimits: () => getPolicy().recording.limits,
-    getConfigVersion: () => getPolicy().configVersion,
     onRecordingLost: onLost,
   });
 
-  const markers = createReplayMarkers((tag, payload) => session.addCustomEvent(tag, payload));
+  // Headers only while every gate but sampling passes; the latest trace id is what a report cites.
+  const tracing = createReplayTracing({ isEnabled: () => session.allowsEvidence() });
+  const markers = createReplayMarkers(
+    (tag, payload) => session.addCustomEvent(tag, payload),
+    (input) => {
+      if (session.allowsEvidence()) uploader.pushEvidence(input);
+    },
+  );
   // Console and network context, each only while its own policy switch is on.
   const diagnostics = createReplayDiagnostics(
     (tag, payload) => session.addCustomEvent(tag, payload),
@@ -80,6 +99,7 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
     },
     undefined,
     () => session.getState().status === "capturing",
+    tracing,
   );
   const session = createReplayCaptureSession({
     ...rest,
@@ -118,22 +138,29 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
 
   function recover(reason: ReplayUploadReason) {
     if (!started) return;
+    // A rotated session is not a failure: its next boundary opens a new one.
+    if (reason === "session_rotated") {
+      session.restartBoundary();
+      return;
+    }
     if (uploader.shouldRestart(reason) && restarts < getPolicy().recording.limits.maxAttempts) {
       restarts += 1;
+      acceptedBaseline = uploader.getState().acceptedBatches;
       session.restartBoundary();
       return;
     }
     if (uploader.shouldRestart(reason)) restartsExhausted = true;
     // Nothing more can be uploaded for this boundary: stop recording it.
     if (RESUMABLE_STOPS.has(reason)) stoppedAtConfig = getPolicy().configVersion;
+    uploader.halt(reason);
     session.dispose();
     refresh();
   }
 
-  // Recovery earned: a recording that uploaded enough batches refills the budget.
+  // Recovery earned: a boundary that uploaded enough batches refills the budget.
   function creditHealthyUploads() {
-    const { history } = uploader.getState();
-    if (history.some((entry) => entry.acceptedBatches >= RECOVERY_BATCHES && entry.outcome !== "unavailable")) {
+    const { acceptedBatches, status } = uploader.getState();
+    if (acceptedBatches - acceptedBaseline >= RECOVERY_BATCHES && status !== "unavailable") {
       restarts = 0;
       restartsExhausted = false;
     }
@@ -150,7 +177,7 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       }));
       cleanups.push(session.subscribe(() => {
         const capture = session.getState();
-        // A recording whose capture stopped is finished: flush it and close it.
+        // A boundary whose capture stopped is finished: send what it still holds.
         if (capture.status === "blocked") uploader.closeActive();
         // The state turns "capturing" just before rrweb starts, inside the same call.
         else queueMicrotask(() => diagnostics.announce(capture.boundary));
@@ -163,15 +190,16 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
         if (capture.status === "capturing") diagnostics.announce(capture.boundary);
         if (stoppedAtConfig !== undefined && getPolicy().configVersion !== stoppedAtConfig) {
           stoppedAtConfig = undefined;
+          uploader.resume();
           session.start();
         }
       }));
 
       markers.start();
+      tracing.start();
       diagnostics.start();
-      const onPageHide = (event: PageTransitionEvent) => {
-        if (!event.persisted) uploader.closeForUnload();
-      };
+      // Whether the page is leaving for good or only frozen, what is queued goes now.
+      const onPageHide = () => uploader.closeForUnload();
       window.addEventListener("pagehide", onPageHide);
       cleanups.push(() => window.removeEventListener("pagehide", onPageHide));
       const onVisibilityChange = () => {
@@ -190,6 +218,7 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       clearTimeout(restartTimer);
       markers.stop();
       diagnostics.stop();
+      tracing.stop();
       for (const cleanup of cleanups.splice(0).reverse()) cleanup();
       session.dispose();
       uploader.clear();
@@ -201,9 +230,29 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       session.refresh();
     },
 
-    /** The reference a bug report may attach, or null. Never a bare local id. */
-    getRecordingReference(): ReplayRecordingReference | null {
-      return uploader.getReference();
+    /**
+     * The session reference a bug report may attach, or null: the live
+     * session this tab sent records for, with the latest trace id and behavior
+     * marker. Null whenever capture is not allowed right now.
+     */
+    getSessionReference(): ReplaySessionEvidence | null {
+      if (!session.allowsEvidence()) return null;
+      const reference = uploader.getReference();
+      if (!reference) return null;
+      const behavior = markers.getLastBehavior();
+      const traceId = tracing.getLastTraceId();
+      return {
+        sessionId: reference.sessionId,
+        startedAt: reference.startedAt,
+        ...(traceId ? { traceId } : {}),
+        ...(behavior?.behaviorId ? { behaviorId: behavior.behaviorId } : {}),
+        ...(behavior?.occurrenceId ? { occurrenceId: behavior.occurrenceId } : {}),
+      };
+    },
+
+    /** Sends everything queued so a report reaches Epic after its session; a few seconds at most. */
+    flush(): Promise<void> {
+      return uploader.flush();
     },
 
     /** Records an application event; harmless when nothing is recording. */

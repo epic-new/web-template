@@ -256,12 +256,14 @@ export function sanitizeNetworkDiagnostic(entry: {
   url: string;
   status: number;
   durationMs: number;
-}): { method: string; url: string; status: number; durationMs: number } | null {
+  traceId?: string;
+}): { method: string; url: string; status: number; durationMs: number; traceId?: string } | null {
   if (!isReplayDiagnosticUrlAllowed(entry.url)) return null;
   return {
     method: String(entry.method).toUpperCase().slice(0, 16),
     url: sanitizeReplayText(entry.url, 2_048),
     status: Number.isFinite(entry.status) ? Math.trunc(entry.status) : 0,
     durationMs: Number.isFinite(entry.durationMs) ? Math.max(0, Math.round(entry.durationMs)) : 0,
+    ...(entry.traceId && /^[0-9a-f]{32}$/.test(entry.traceId) ? { traceId: entry.traceId } : {}),
   };
 }

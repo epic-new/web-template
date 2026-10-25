@@ -1,29 +1,39 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearEpicEnv, jsonResponse, stubEpicEnv } from "@/lib/replay/tests/runtime-config.fixture";
 import { getUser } from "@/lib/auth";
+import { clearEpicEnv, jsonResponse, stubEpicEnv } from "@/lib/replay/tests/runtime-config.fixture";
 import { POST } from "../../../route";
 
 vi.mock("@/lib/auth", () => ({ getUser: vi.fn() }));
 
 const ORIGIN = "http://localhost:8080";
+const SESSION_ID = "0123456789abcdef0123456789abcdef";
 const body = JSON.stringify({
-  contractVersion: 1,
-  idempotencyKey: "6f1c5a0e-1b0e-4d6f-9a52-2f1b9d9d1c11",
-  startedAt: 1_800_000_000_000,
-  route: "/",
-  recorderVersion: "2.2.0",
-  configVersion: "3",
-  release: null,
-  viewport: null,
+  resourceLogs: [
+    {
+      resource: { attributes: [{ key: "rum.sessionId", value: { stringValue: SESSION_ID } }] },
+      scopeLogs: [
+        {
+          scope: { name: "rum.rr-web" },
+          logRecords: [
+            {
+              timeUnixNano: "1800000000000000000",
+              body: { stringValue: '{"type":4,"timestamp":1800000000000,"data":{}}' },
+              attributes: [{ key: "rr-web.offset", value: { stringValue: "0" } }],
+            },
+          ],
+        },
+      ],
+    },
+  ],
 });
 
 function request(headers: Record<string, string>, payload: BodyInit = body) {
-  return new NextRequest(`${ORIGIN}/api/epic/replay/recordings`, { method: "POST", headers, body: payload });
+  return new NextRequest(`${ORIGIN}/api/epic/replay/telemetry`, { method: "POST", headers, body: payload });
 }
 
-describe("POST /api/epic/replay/recordings", () => {
+describe("POST /api/epic/replay/telemetry", () => {
   const upstream = vi.fn<typeof fetch>();
 
   beforeEach(() => {
@@ -62,29 +72,8 @@ describe("POST /api/epic/replay/recordings", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
-  it("registers for a signed-in user without exposing identity or credentials", async () => {
-    upstream.mockResolvedValue(
-      jsonResponse(
-        {
-          contractVersion: 1,
-          recordingId: "0a1b2c3d-1b0e-4d6f-9a52-2f1b9d9d1c11",
-          recordingToken: "eprc_1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-          tokenExpiresAt: 1_800_000_900_000,
-          startedAt: 1_800_000_000_000,
-          availability: "waiting_for_events",
-          limits: {
-            maxBatchBytes: 1_048_576,
-            maxBatchEvents: 500,
-            maxBufferBytes: 5_242_880,
-            maxBufferAgeMs: 60_000,
-            flushIntervalMs: 20_000,
-            flushBytes: 65_536,
-            maxAttempts: 3,
-          },
-        },
-        201,
-      ),
-    );
+  it("relays for a signed-in user without cookies, address or the full User-Agent", async () => {
+    upstream.mockResolvedValue(jsonResponse({ partialSuccess: {} }));
 
     const response = await POST(
       request({
@@ -93,18 +82,23 @@ describe("POST /api/epic/replay/recordings", () => {
         Cookie: "session=secret",
         Referer: "http://localhost:8080/private",
         "X-Forwarded-For": "203.0.113.9",
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1",
+        "User-Agent":
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 Version/17.4 Mobile/15E148 Safari/604.1",
       }),
     );
 
-    expect(response.status).toBe(201);
-    const text = await response.text();
-    for (const secret of ["subjectId", "test-publishing-token", "proj-1", "user-1"]) {
-      expect(text).not.toContain(secret);
-    }
-    const headers = new Headers(upstream.mock.calls[0]![1]?.headers);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ partialSuccess: {} });
+    const [url, init] = upstream.mock.calls[0]!;
+    expect(url).toBe("https://epic.test/api/observability/v1/logs");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer test-publishing-token");
     for (const header of ["cookie", "origin", "referer", "x-forwarded-for", "user-agent"]) {
       expect(headers.has(header)).toBe(false);
+    }
+    const sent = String(init?.body);
+    for (const secret of ["user-1", "session=secret", "203.0.113.9", "iPhone"]) {
+      expect(sent).not.toContain(secret);
     }
   });
 });

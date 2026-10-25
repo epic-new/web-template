@@ -1,71 +1,68 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
-  REPLAY_RECORDER_VERSION,
-  replayBatchRequestSchema,
-  replayRegistrationRequestSchema,
+  replayIdentityRequestSchema,
   replayReportRequestSchema,
+  REPLAY_UPLOAD_ERROR_CODES,
+  REPLAY_UPLOAD_ERROR_STATUS,
   toReplayPathname,
 } from "../replay-upload-contract";
 
-const registration = {
+const KEY = "6f1c5a0e-1b0e-4d6f-9a52-2f1b9d9d1c11";
+const SESSION_ID = "0123456789abcdef0123456789abcdef";
+
+const report = {
   contractVersion: 1,
-  idempotencyKey: "6f1c5a0e-1b0e-4d6f-9a52-2f1b9d9d1c11",
-  startedAt: 1_800_000_000_000,
-  route: "/checkout",
-  recorderVersion: REPLAY_RECORDER_VERSION,
-  configVersion: "3",
-  release: "abc123",
-  viewport: { width: 390, height: 844 },
+  idempotencyKey: KEY,
+  reportedAt: 1,
+  route: "/",
+  release: null,
+  evidence: null,
+  description: "  broke  ",
 };
 
 describe("replay upload contract", () => {
-  it("pins the recorder version to the installed package", () => {
-    const installed = JSON.parse(readFileSync("node_modules/@rrweb/record/package.json", "utf8")).version;
-    expect(REPLAY_RECORDER_VERSION).toBe(installed);
-  });
-
-  it("rejects ownership fields and unknown keys from the browser", () => {
-    expect(replayRegistrationRequestSchema.safeParse(registration).success).toBe(true);
-    for (const extra of [
-      { subjectId: "sub_x" },
-      { projectId: "proj-1" },
-      { applicationId: "app-1" },
-      { environment: "production" },
-      { captureContext: {} },
-      { cloudRecordingId: "6f1c5a0e-1b0e-4d6f-9a52-2f1b9d9d1c11" },
-    ]) {
-      expect(replayRegistrationRequestSchema.safeParse({ ...registration, ...extra }).success).toBe(false);
-    }
-    expect(replayRegistrationRequestSchema.safeParse({ ...registration, route: "/a?token=1" }).success).toBe(false);
-    expect(replayRegistrationRequestSchema.safeParse({ ...registration, route: "//evil" }).success).toBe(false);
-  });
-
-  it("bounds batches and report text", () => {
-    const batch = {
-      contractVersion: 1,
-      recordingToken: "eprc_1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      batchId: registration.idempotencyKey,
-      sequence: 0,
-      events: [],
-      final: true,
-    };
-    expect(replayBatchRequestSchema.safeParse(batch).success).toBe(true);
-    expect(replayBatchRequestSchema.safeParse({ ...batch, subjectId: "sub_x" }).success).toBe(false);
-
-    const report = {
-      contractVersion: 1,
-      idempotencyKey: registration.idempotencyKey,
-      reportedAt: 1,
-      route: "/",
-      release: null,
-      evidence: null,
-      description: "  broke  ",
-    };
+  it("bounds report text and trims it", () => {
     expect(replayReportRequestSchema.parse(report).description).toBe("broke");
     expect(replayReportRequestSchema.safeParse({ ...report, description: "   " }).success).toBe(false);
     expect(replayReportRequestSchema.safeParse({ ...report, description: "x".repeat(5_001) }).success).toBe(false);
+  });
+
+  it("accepts a session reference and nothing that names an owner", () => {
+    const evidence = {
+      sessionId: SESSION_ID,
+      startedAt: 1_800_000_000_000,
+      offsetMs: 1_200,
+      traceId: "a".repeat(32),
+      behaviorId: "checkout",
+      occurrenceId: "occ-1",
+    };
+    expect(replayReportRequestSchema.safeParse({ ...report, evidence }).success).toBe(true);
+    expect(replayReportRequestSchema.safeParse({ ...report, evidence: { ...evidence, traceId: undefined } }).success).toBe(true);
+
+    for (const bad of [
+      { ...evidence, sessionId: SESSION_ID.toUpperCase() },
+      { ...evidence, sessionId: "short" },
+      { ...evidence, traceId: "xyz" },
+      { ...evidence, recordingId: KEY },
+      { ...evidence, subjectId: "sub_x" },
+    ]) {
+      expect(replayReportRequestSchema.safeParse({ ...report, evidence: bad }).success).toBe(false);
+    }
+    expect(replayReportRequestSchema.safeParse({ ...report, subjectId: "sub_x" }).success).toBe(false);
+  });
+
+  it("keeps the recording protocol's error codes out and adds unsupported_media_type to Epic's", () => {
+    expect(REPLAY_UPLOAD_ERROR_CODES).toContain("unsupported_media_type");
+    for (const removed of ["capability_expired", "invalid_capability", "recording_not_found", "recording_closed", "subject_mismatch"]) {
+      expect(REPLAY_UPLOAD_ERROR_CODES).not.toContain(removed);
+    }
+    expect(REPLAY_UPLOAD_ERROR_STATUS.unsupported_media_type).toBe(415);
+  });
+
+  it("rejects unknown keys in the identity handshake", () => {
+    expect(replayIdentityRequestSchema.safeParse({ contractVersion: 1, purpose: "capture" }).success).toBe(true);
+    expect(replayIdentityRequestSchema.safeParse({ contractVersion: 1, subjectId: "sub_x" }).success).toBe(false);
   });
 
   it("reduces a location to its pathname", () => {

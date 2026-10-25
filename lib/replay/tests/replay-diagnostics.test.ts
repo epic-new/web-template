@@ -230,4 +230,49 @@ describe("replay diagnostics", () => {
       { console: true, network: true },
     ]);
   });
+
+  it("records the trace id of a request, whichever wrapper is installed first", async () => {
+    settings = { console: false, network: true };
+    const traceId = "a".repeat(32);
+
+    // Diagnostics around a tracing wrapper: the id is known once the call returns.
+    let issued = 0;
+    const tracing = {
+      getLastTraceId: () => traceId,
+      issuedCount: () => issued,
+      traceIdOfXhr: () => null,
+    };
+    const innerFetch = vi.fn(async () => {
+      issued += 1;
+      return new Response("ok");
+    });
+    window.fetch = innerFetch as unknown as typeof window.fetch;
+    const outer = createReplayDiagnostics(
+      (tag, payload) => {
+        recorded.push({ tag, payload: payload as Record<string, unknown> });
+        return true;
+      },
+      () => settings,
+      undefined,
+      undefined,
+      tracing,
+    );
+    outer.start();
+    await window.fetch("/api/orders");
+    outer.stop();
+
+    // Diagnostics inside a tracing wrapper: the id is read off the header it added.
+    window.fetch = pageFetch as unknown as typeof window.fetch;
+    const inner = create();
+    inner.start();
+    await window.fetch("/api/orders", { headers: { traceparent: `00-${traceId}-${"b".repeat(16)}-01` } });
+    await window.fetch("/api/other");
+    inner.stop();
+
+    const entries = recorded.filter((entry) => entry.tag === NETWORK_TAG).map((entry) => entry.payload);
+    expect(entries).toHaveLength(3);
+    expect(entries[0]).toMatchObject({ url: "/api/orders", traceId });
+    expect(entries[1]).toMatchObject({ url: "/api/orders", traceId });
+    expect(entries[2]).not.toHaveProperty("traceId");
+  });
 });

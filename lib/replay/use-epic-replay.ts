@@ -4,7 +4,8 @@ import { createContext, useContext } from "react";
 
 import type { ReplayCaptureState } from "./replay-capture";
 import type { ReplayEventResult } from "./replay-markers";
-import type { ReplayRecordingReference, ReplayUploadState } from "./replay-uploader";
+import type { ReplaySessionEvidence } from "./replay-recording-pipeline";
+import type { ReplayUploadState } from "./replay-uploader";
 
 /**
  * What the application can know about replay. `recording` means a recorder is
@@ -27,10 +28,13 @@ export interface EpicReplay {
   evidence: "unverified";
   reporting: { enabled: boolean };
   /**
-   * The recording a bug report may attach, or null. Only a recording this tab
-   * registered successfully is ever returned.
+   * The session a bug report may cite, with the latest trace id and behavior
+   * marker, or null. Only a session this tab sent records for, while capture
+   * is allowed, is ever returned.
    */
-  getRecordingReference(): ReplayRecordingReference | null;
+  getSessionReference(): ReplaySessionEvidence | null;
+  /** Sends everything queued, so a report reaches Epic after its session. Never rejects. */
+  flush(): Promise<void>;
   /** Records an application event; harmless when nothing is recording. */
   event(name: string, payload?: unknown): ReplayEventResult;
 }
@@ -42,7 +46,8 @@ const DISABLED: EpicReplay = {
   upload: null,
   evidence: "unverified",
   reporting: { enabled: false },
-  getRecordingReference: () => null,
+  getSessionReference: () => null,
+  flush: () => Promise.resolve(),
   event: () => ({ recorded: false, reason: "not_recording" }),
 };
 

@@ -154,7 +154,7 @@ export class ReadReplayConfig {
   ): PublicReplayConfig {
     const { capture, reporting, recording } = resource;
     return {
-      contractVersion: 1,
+      contractVersion: 2,
       status: "active",
       reason: null,
       configVersion: resource.configVersion,
@@ -168,6 +168,7 @@ export class ReadReplayConfig {
       ),
       capture: {
         enabled: capture.enabled,
+        consentMode: capture.consentMode,
         sessionSampleRate: capture.sessionSampleRate,
         routes: {
           include: [...capture.routes.include],
@@ -184,6 +185,7 @@ export class ReadReplayConfig {
         },
       },
       reporting: { enabled: reporting.enabled },
+      retention: { days: resource.retention.days },
       recording: {
         transport: recording.transport,
         limits: {
@@ -194,6 +196,7 @@ export class ReadReplayConfig {
           flushIntervalMs: recording.limits.flushIntervalMs,
           flushBytes: recording.limits.flushBytes,
           maxAttempts: recording.limits.maxAttempts,
+          maxChunkBytes: recording.limits.maxChunkBytes,
         },
       },
     };

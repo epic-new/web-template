@@ -1,12 +1,12 @@
 import "server-only";
 
 /**
- * The EPI-209 (version 1) server-to-server runtime config resource. The
+ * The version 2 server-to-server runtime config resource. The
  * publishing credential selects the project, application and environment;
  * this is what the central runtime route returns for it.
  */
 export interface RuntimeConfigResource {
-  contractVersion: 1;
+  contractVersion: 2;
   projectId: string;
   applicationId: string;
   environment: "production" | "preview" | "development" | "test";
@@ -16,6 +16,7 @@ export interface RuntimeConfigResource {
   refreshIntervalMs: number;
   capture: {
     enabled: boolean;
+    consentMode: "required" | "not_required";
     sessionSampleRate: number;
     routes: { include: string[]; exclude: string[] };
     privacy: {
@@ -26,8 +27,9 @@ export interface RuntimeConfigResource {
     diagnostics: { console: boolean; network: boolean };
   };
   reporting: { enabled: boolean };
+  retention: { days: number };
   recording: {
-    transport: "epic-http";
+    transport: "otlp-relay";
     limits: {
       maxBatchBytes: number;
       maxBatchEvents: number;
@@ -36,6 +38,7 @@ export interface RuntimeConfigResource {
       flushIntervalMs: number;
       flushBytes: number;
       maxAttempts: number;
+      maxChunkBytes: number;
     };
   };
 }

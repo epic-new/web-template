@@ -1,3 +1,4 @@
+import { EVIDENCE_EVENTS, type EvidenceInput } from "./replay-otlp";
 import { normalizeReplayPath } from "./replay-routes";
 import { sanitizeReplayError } from "./replay-redaction";
 
@@ -6,6 +7,11 @@ import { sanitizeReplayError } from "./replay-redaction";
  * events so they sit on the same millisecond timeline as everything else.
  * They carry no free text from the application: a behavior event holds only
  * short identifiers, an error holds the sanitized name, message and stack.
+ *
+ * Behavior events and browser errors are also handed to `emitEvidence` as
+ * plain log records, whether or not the replay is being recorded: the
+ * replay timeline reads the rrweb markers, the evidence stays queryable for
+ * sessions the sampler left unrecorded.
  */
 
 export const REPLAY_EVENT_NAMES = [
@@ -50,15 +56,28 @@ export function sanitizeReplayEventPayload(payload: unknown): ReplayEventPayload
 }
 
 type AddCustomEvent = (tag: string, payload: unknown) => boolean;
+type EmitEvidence = (input: EvidenceInput) => void;
+
+const BEHAVIOR_EVIDENCE: Partial<Record<ReplayEventName, EvidenceInput["event"]>> = {
+  "epic.behavior.started": EVIDENCE_EVENTS.behaviorStarted,
+  "epic.behavior.succeeded": EVIDENCE_EVENTS.behaviorSucceeded,
+  "epic.behavior.failed": EVIDENCE_EVENTS.behaviorFailed,
+};
 
 /**
  * Navigation and error markers for the one provider. `start()` is idempotent
  * and `stop()` removes every listener, so remounts never duplicate a marker.
  */
-export function createReplayMarkers(add: AddCustomEvent) {
+export function createReplayMarkers(
+  add: AddCustomEvent,
+  emitEvidence?: EmitEvidence,
+  getRoute: () => string = () => normalizeReplayPath(window.location.pathname),
+  now: () => number = () => Date.now(),
+) {
   let started = false;
   let emitting = false;
   let errors = 0;
+  let lastBehavior: { behaviorId?: string; occurrenceId?: string } | null = null;
   const cleanups: (() => void)[] = [];
 
   // A failure while adding a marker must not produce a marker of its own.
@@ -79,6 +98,17 @@ export function createReplayMarkers(add: AddCustomEvent) {
     errors += 1;
     const { name, message, stack } = sanitizeReplayError(error);
     guarded(ERROR_TAG, { kind, name, message, stack });
+    evidence({ event: EVIDENCE_EVENTS.browserError, body: `${name}: ${message}` });
+  }
+
+  // Evidence never throws into the page and never depends on the replay recording.
+  function evidence(input: Omit<EvidenceInput, "at" | "route">) {
+    if (!emitEvidence) return;
+    try {
+      emitEvidence({ ...input, at: now(), route: getRoute().slice(0, 512) });
+    } catch {
+      // Evidence is best effort.
+    }
   }
 
   return {
@@ -106,10 +136,26 @@ export function createReplayMarkers(add: AddCustomEvent) {
       guarded(NAVIGATE_TAG, { path: normalizeReplayPath(pathname).slice(0, 512) });
     },
 
+    /** The identifiers of the latest behavior marker, for a report to cite. */
+    getLastBehavior(): { behaviorId?: string; occurrenceId?: string } | null {
+      return lastBehavior ? { ...lastBehavior } : null;
+    },
+
     event(name: unknown, payload?: unknown): ReplayEventResult {
       if (!isReplayEventName(name)) return { recorded: false, reason: "unsupported_event" };
+      const clean = sanitizeReplayEventPayload(payload);
+      const behavior = BEHAVIOR_EVIDENCE[name];
+      if (behavior) {
+        lastBehavior = { behaviorId: clean.behaviorId, occurrenceId: clean.occurrenceId };
+        evidence({
+          event: behavior,
+          body: `${behavior}${clean.behaviorId ? ` ${clean.behaviorId}` : ""}`,
+          behaviorName: clean.behaviorId,
+          occurrence: clean.occurrenceId,
+        });
+      }
       try {
-        const recorded = add(name, sanitizeReplayEventPayload(payload));
+        const recorded = add(name, clean);
         return recorded ? { recorded: true } : { recorded: false, reason: "not_recording" };
       } catch {
         return { recorded: false, reason: "not_recording" };

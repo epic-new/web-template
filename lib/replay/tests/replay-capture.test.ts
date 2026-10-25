@@ -104,6 +104,55 @@ describe("createReplayCaptureSession", () => {
     expect(session.getState()).toMatchObject({ status: "blocked", reason: "consent_absent" });
   });
 
+  it("allows evidence without the sampler, but only under every other gate", () => {
+    const fake = fakeRecord();
+    const { session } = setup({ record: fake.record });
+    // The sampler would refuse; evidence does not draw one.
+    const unsampled = createReplayCaptureSession({
+      sink: { push: () => undefined, clear: () => undefined },
+      getPolicy: () => activeReplayPolicy(),
+      subscribePolicy: () => () => undefined,
+      sampler: { decide: () => false },
+      record: fake.record,
+    });
+    dispose = () => {
+      session.dispose();
+      unsampled.dispose();
+    };
+
+    expect(unsampled.allowsEvidence()).toBe(false);
+    unsampled.start();
+    expect(unsampled.allowsEvidence()).toBe(false);
+
+    epicReplayConsent.grant();
+    expect(unsampled.getState()).toMatchObject({ status: "blocked", reason: "not_sampled" });
+    expect(unsampled.allowsEvidence()).toBe(true);
+
+    window.history.replaceState({}, "", "/excluded");
+    expect(unsampled.allowsEvidence()).toBe(false);
+
+    window.history.replaceState({}, "", "/");
+    epicReplayConsent.withdraw();
+    expect(unsampled.allowsEvidence()).toBe(false);
+  });
+
+  it("starts recording without a prompt where consent is not required, until the visitor opts out", () => {
+    const fake = fakeRecord();
+    const { session, buffer } = setup({
+      record: fake.record,
+      policy: activeReplayPolicy({ consentMode: "not_required" }),
+    });
+    dispose = session.dispose;
+
+    session.start();
+    expect(session.getState()).toMatchObject({ status: "capturing" });
+    expect(buffer.events()).toHaveLength(2);
+
+    epicReplayConsent.withdraw();
+    expect(session.getState()).toMatchObject({ status: "blocked", reason: "consent_withdrawn" });
+    expect(buffer.events()).toEqual([]);
+  });
+
   it("records nothing under a disabled policy even with consent", () => {
     const fake = fakeRecord();
     const { session, buffer } = setup({
