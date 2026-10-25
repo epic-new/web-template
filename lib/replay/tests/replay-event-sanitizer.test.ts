@@ -229,4 +229,58 @@ describe("sanitizeReplayEvent", () => {
     sanitizeReplayEvent(original);
     expect((original as { data: { href: string } }).data.href).toBe("/?token=synthetic");
   });
+
+  it("masks a textarea's default value, which is a child text node, including later edits to it", () => {
+    const sanitizer = createReplayEventSanitizer();
+    const snapshot = sanitizer.sanitize(
+      event({
+        type: EventType.FullSnapshot,
+        timestamp: 1,
+        data: {
+          initialOffset: { top: 0, left: 0 },
+          node: {
+            type: 0,
+            id: 1,
+            childNodes: [
+              {
+                type: 2,
+                id: 2,
+                tagName: "textarea",
+                attributes: {},
+                childNodes: [{ type: 3, id: 3, textContent: "synthetic bio" }],
+              },
+              { type: 3, id: 4, textContent: "visible" },
+            ],
+          },
+        },
+      }),
+    );
+    const mutation = sanitizer.sanitize(
+      event({
+        type: EventType.IncrementalSnapshot,
+        timestamp: 2,
+        data: {
+          source: IncrementalSource.Mutation,
+          adds: [{ parentId: 2, nextId: null, node: { type: 3, id: 5, textContent: "synthetic more" } }],
+          texts: [{ id: 3, value: "synthetic edit" }, { id: 4, value: "still visible" }],
+          attributes: [],
+          removes: [],
+        },
+      }),
+    );
+
+    const json = JSON.stringify([snapshot, mutation]);
+    expect(json).not.toMatch(/synthetic/);
+    expect(json).toContain("visible");
+    expect(json).toContain("still visible");
+  });
+
+  it("passes pointer and scroll events through untouched", () => {
+    const move = event({
+      type: EventType.IncrementalSnapshot,
+      timestamp: 1,
+      data: { source: IncrementalSource.MouseMove, positions: [{ x: 1, y: 2, id: 3, timeOffset: 0 }] },
+    });
+    expect(sanitizeReplayEvent(move)).toBe(move);
+  });
 });

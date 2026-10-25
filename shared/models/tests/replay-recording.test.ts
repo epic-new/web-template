@@ -63,4 +63,24 @@ describe("ReplayRecordingModel", () => {
     await expect(ReplayRecordingModel.consumeRate("ip_new", "identity", { ...window, now: 50_100 })).resolves.toMatchObject({ allowed: false });
     await expect(ReplayRecordingModel.consumeRate("sub_old", "report", { ...window, now: 1_100 })).resolves.toMatchObject({ allowed: false });
   });
+
+  it("prunes spent counters and recordings past retention, at most once per interval", async () => {
+    ReplayRecordingModel.clearOwnershipCache();
+    const day = 24 * 60 * 60_000;
+    const now = Date.now();
+    await ReplayRecordingModel.insertRegistering(registration({ id: "fresh", idempotencyKey: "fresh" }));
+    await ReplayRecordingModel.consumeRate("sub_old", "register", { limit: 1, windowMs: 1_000, now: now - 2 * 60 * 60_000 });
+    await ReplayRecordingModel.consumeRate("sub_new", "register", { limit: 1, windowMs: 1_000, now });
+
+    await ReplayRecordingModel.pruneStale(now + 31 * day);
+
+    await expect(ReplayRecordingModel.findByIdempotencyKey("sub_a", "fresh")).resolves.toBeNull();
+    const rate = (id: string, at: number) =>
+      ReplayRecordingModel.consumeRate(id, "register", { limit: 1, windowMs: 1_000, now: at });
+    await expect(rate("sub_old", now + 31 * day)).resolves.toMatchObject({ allowed: true });
+
+    await ReplayRecordingModel.insertRegistering(registration({ id: "again", idempotencyKey: "again" }));
+    await ReplayRecordingModel.pruneStale(now + 31 * day + 1_000);
+    await expect(ReplayRecordingModel.findByIdempotencyKey("sub_a", "again")).resolves.not.toBeNull();
+  });
 });

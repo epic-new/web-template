@@ -4,6 +4,7 @@ import {
   isCredentialParam,
   jsonByteLength,
   REDACTED,
+  redactSecrets,
   REPLAY_PAYLOAD_LIMITS,
   sanitizeCssText,
   sanitizeNetworkDiagnostic,
@@ -127,5 +128,12 @@ describe("UTF-8 payload bound", () => {
     expect(JSON.stringify(payload).length).toBeLessThan(REPLAY_PAYLOAD_LIMITS.maxPayloadBytes);
     expect(sanitizeReplayPayload(payload)).toEqual({ truncated: true });
     expect(sanitizeReplayPayload(["é".repeat(100)])).toEqual(["é".repeat(100)]);
+  });
+});
+
+describe("redactSecrets", () => {
+  it("redacts a JWT that a length bound cut before its signature", () => {
+    const cut = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ";
+    expect(redactSecrets(`token was ${cut}`)).not.toContain("eyJhbGci");
   });
 });

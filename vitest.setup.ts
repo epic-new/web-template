@@ -13,6 +13,8 @@ expand(config({ path: ".env.test", override: true }));
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import * as schema from "@/db/schema";
+import { ReadReplayConfig } from "@/app/api/epic/replay/config/behaviors/read-replay-config/read-replay-config.service";
+import { ReplayRecordingModel } from "@/shared/models/replay-recording";
 
 // Mock server-only package (used by Next.js server actions)
 vi.mock("server-only", () => ({}));
@@ -63,4 +65,7 @@ beforeEach(async () => {
     await db.run(sql.raw(`DELETE FROM "${name}"`));
   }
   await db.run(sql`PRAGMA foreign_keys = ON`);
+  // The replay relay caches rows and Epic answers in process memory; they must not outlive a test.
+  ReadReplayConfig.resetCache();
+  ReplayRecordingModel.clearOwnershipCache();
 });

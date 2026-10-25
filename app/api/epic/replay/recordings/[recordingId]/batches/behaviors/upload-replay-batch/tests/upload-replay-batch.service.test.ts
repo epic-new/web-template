@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { clearEpicEnv, jsonResponse, stubEpicEnv } from "@/lib/replay/tests/runtime-config.fixture";
+import { db } from "@/db";
+import { replayRecording } from "@/db/schema";
 import { deriveReplaySubject } from "@/lib/replay/server/replay-subject";
 import { ReplayRecordingModel } from "@/shared/models/replay-recording";
 import { UploadReplayBatch } from "../upload-replay-batch.service";
@@ -32,10 +34,11 @@ describe("UploadReplayBatch", () => {
   const upstream = vi.fn<typeof fetch>();
 
   beforeEach(async () => {
+    ReplayRecordingModel.clearOwnershipCache();
     clearEpicEnv();
     stubEpicEnv();
     vi.stubGlobal("fetch", upstream);
-    upstream.mockResolvedValue(jsonResponse(ack));
+    upstream.mockImplementation(async () => jsonResponse(ack));
 
     const subjectId = deriveReplaySubject(owner, process.env.BETTER_AUTH_SECRET!);
     await ReplayRecordingModel.insertRegistering({
@@ -117,5 +120,24 @@ describe("UploadReplayBatch", () => {
     await expect(
       UploadReplayBatch.execute({ actor: owner, recordingId: RECORDING_ID, input: batch() }),
     ).resolves.toEqual(ack);
+  });
+
+  it("reads ownership once per recording, then trusts the confirmed binding", async () => {
+    await UploadReplayBatch.execute({ actor: owner, recordingId: RECORDING_ID, input: batch() });
+    await db.delete(replayRecording);
+
+    await expect(
+      UploadReplayBatch.execute({ actor: owner, recordingId: RECORDING_ID, input: batch({ sequence: 1 }) }),
+    ).resolves.toEqual(ack);
+    await expect(
+      UploadReplayBatch.execute({ actor: stranger, recordingId: RECORDING_ID, input: batch() }),
+    ).rejects.toMatchObject({ code: "recording_not_found" });
+  });
+
+  it("rejects a malformed recording id without touching the database or Epic", async () => {
+    await expect(
+      UploadReplayBatch.execute({ actor: owner, recordingId: "../reports", input: batch() }),
+    ).rejects.toMatchObject({ code: "recording_not_found", status: 404 });
+    expect(upstream).not.toHaveBeenCalled();
   });
 });

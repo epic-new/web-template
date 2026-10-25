@@ -10,6 +10,7 @@ import {
   stubEpicEnv,
 } from "@/lib/replay/tests/runtime-config.fixture";
 import { GET } from "../../../route";
+import { ReadReplayConfig } from "../read-replay-config.service";
 
 // Next invokes route handlers with the request; ours ignores it on purpose.
 const invoke = GET as unknown as (request?: NextRequest) => Promise<Response>;
@@ -18,6 +19,7 @@ describe("GET /api/epic/replay/config", () => {
   const upstream = vi.fn<typeof fetch>();
 
   beforeEach(() => {
+    ReadReplayConfig.resetCache();
     clearEpicEnv();
     vi.stubGlobal("fetch", upstream);
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -48,6 +50,8 @@ describe("GET /api/epic/replay/config", () => {
     const leaky = runtimeConfigFixture();
     (leaky.capture as Record<string, unknown>).privateKey = "rrweb-private-key";
     upstream.mockResolvedValue(jsonResponse(leaky));
+    // A later Epic answer, past the relay's short cache.
+    ReadReplayConfig.resetCache();
 
     const failed = await invoke();
     const failedText = await failed.text();
@@ -64,7 +68,6 @@ describe("GET /api/epic/replay/config", () => {
     upstream.mockImplementation(async () => jsonResponse(runtimeConfigFixture()));
 
     const plain = await (await invoke()).json();
-    upstream.mockClear();
     const forged = await (
       await invoke(
         new NextRequest(
@@ -75,6 +78,7 @@ describe("GET /api/epic/replay/config", () => {
     ).json();
     vi.useRealTimers();
 
+    // The forged scope selects nothing: it is served from the same cached Epic answer.
     expect(forged).toEqual(plain);
     expect(upstream).toHaveBeenCalledTimes(1);
     const [url, init] = upstream.mock.calls[0];

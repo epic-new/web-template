@@ -1,5 +1,7 @@
 import "server-only";
 
+import { z } from "zod";
+
 import {
   REPLAY_BATCH_HARD_MAX_BYTES,
   REPLAY_BATCH_MAX_EVENTS,
@@ -14,7 +16,7 @@ import {
   RecordingsResource,
   type BatchPayload,
 } from "@/shared/integrations/epic/resources/recordings.resource";
-import { ReplayRecordingModel } from "@/shared/models/replay-recording";
+import { ReplayRecordingModel, type ReplayRecordingRecord } from "@/shared/models/replay-recording";
 import { ReplayRecordingPolicy } from "@/shared/policies/replay-recording.policy";
 
 // Epic bounds its own provider call at 10 s; leave room for its answer.
@@ -50,8 +52,17 @@ export class UploadReplayBatch {
       if (!client || !secret) throw new ReplayUploadError("not_configured");
 
       const subjectId = deriveReplaySubject(command.actor, secret);
-      const record = await ReplayRecordingModel.findByRecordingId(command.recordingId);
+      if (!z.string().uuid().safeParse(command.recordingId).success) {
+        throw new ReplayUploadError("recording_not_found");
+      }
+      // A confirmed owner is remembered in-process, so a steady stream of
+      // batches costs one read per recording rather than one per batch.
+      const known = ReplayRecordingModel.isOwnershipKnown(command.recordingId, subjectId);
+      const record = known
+        ? { subjectId, recordingId: command.recordingId }
+        : await ReplayRecordingModel.findByRecordingId(command.recordingId);
       this.authorize({ subjectId }, record);
+      if (!known) ReplayRecordingModel.rememberOwnership(command.recordingId, subjectId);
 
       // The complete request Epic receives, including the injected subject.
       const payload: BatchPayload = {
@@ -105,7 +116,7 @@ export class UploadReplayBatch {
 
   private static authorize(
     actor: { subjectId: string },
-    record: Awaited<ReturnType<typeof ReplayRecordingModel.findByRecordingId>>,
+    record: Pick<ReplayRecordingRecord, "subjectId" | "recordingId"> | null,
   ): void {
     if (!ReplayRecordingPolicy.canRelay(actor, record)) {
       throw new ReplayUploadError("recording_not_found");

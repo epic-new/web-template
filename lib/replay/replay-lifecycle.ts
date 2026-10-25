@@ -73,6 +73,8 @@ function notify() {
 // Recomputes the effective policy. Returns true when it changed.
 function evaluate(): boolean {
   const next = effective();
+  // Capture reads this on every event: an unchanged policy is the same object.
+  if (next === current) return false;
   // Compare the whole policy, not just enablement or version, so a change to
   // routes, privacy, diagnostics, limits or expiry still reaches listeners.
   if (JSON.stringify(next) === JSON.stringify(current)) return false;

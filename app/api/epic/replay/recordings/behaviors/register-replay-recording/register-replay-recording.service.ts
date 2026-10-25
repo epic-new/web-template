@@ -50,10 +50,9 @@ export class RegisterReplayRecording {
       if (!client || !secret) throw new ReplayUploadError("not_configured");
 
       const subjectId = deriveReplaySubject(command.actor, secret);
-      const rate = await ReplayRecordingModel.consumeRate(subjectId, "register", {
-        ...REGISTER_RATE,
-        now: Date.now(),
-      });
+      const now = Date.now();
+      await ReplayRecordingModel.pruneStale(now);
+      const rate = await ReplayRecordingModel.consumeRate(subjectId, "register", { ...REGISTER_RATE, now });
       if (!rate.allowed) throw new ReplayUploadError("rate_limited", { retryAfterMs: rate.retryAfterMs });
 
       const hash = canonicalReplayHash({ subjectId, ...input });

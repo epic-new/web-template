@@ -19,11 +19,18 @@ const bindings: Record<string, Record<string, unknown>> = {
   [PREVIEW_TOKEN]: { environment: "preview", configVersion: "preview-v7" },
 };
 
+/** Each call stands for a later Epic answer, past the relay's short cache. */
+function readAfresh() {
+  ReadReplayConfig.resetCache();
+  return ReadReplayConfig.execute();
+}
+
 describe("ReadReplayConfig", () => {
   const upstream = vi.fn<typeof fetch>();
   let warn: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    ReadReplayConfig.resetCache();
     vi.useFakeTimers({ toFake: ["Date"], now: NOW });
     clearEpicEnv();
     vi.stubGlobal("fetch", upstream);
@@ -45,7 +52,7 @@ describe("ReadReplayConfig", () => {
   it("gives production and preview each their own versioned policy", async () => {
     stubEpicEnv(PRODUCTION_TOKEN, "production");
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "abc123");
-    const production = await ReadReplayConfig.execute();
+    const production = await readAfresh();
     expect(production).toMatchObject({
       status: "active",
       environment: "production",
@@ -55,11 +62,11 @@ describe("ReadReplayConfig", () => {
     });
 
     stubEpicEnv(PREVIEW_TOKEN, "preview");
-    const preview = await ReadReplayConfig.execute();
+    const preview = await readAfresh();
     expect(preview).toMatchObject({ environment: "preview", configVersion: "preview-v7" });
 
     stubEpicEnv(PRODUCTION_TOKEN, "preview");
-    expect(await ReadReplayConfig.execute()).toMatchObject({
+    expect(await readAfresh()).toMatchObject({
       status: "disabled",
       reason: "invalid_policy",
     });
@@ -72,13 +79,22 @@ describe("ReadReplayConfig", () => {
     }
   });
 
+  it("shares one upstream call among callers within the cache window", async () => {
+    stubEpicEnv(PRODUCTION_TOKEN, "production");
+    const [first, second] = await Promise.all([ReadReplayConfig.execute(), ReadReplayConfig.execute()]);
+    await ReadReplayConfig.execute();
+
+    expect(second).toEqual(first);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps capture and reporting independent", async () => {
     stubEpicEnv();
     bindings[PRODUCTION_TOKEN].capture = {
       ...runtimeConfigFixture().capture,
       enabled: false,
     };
-    const result = await ReadReplayConfig.execute();
+    const result = await readAfresh();
     delete bindings[PRODUCTION_TOKEN].capture;
 
     expect(result).toMatchObject({
@@ -90,7 +106,7 @@ describe("ReadReplayConfig", () => {
 
   it("fails closed without calling upstream when not configured", async () => {
     vi.stubEnv("NODE_ENV", "test");
-    const result = await ReadReplayConfig.execute();
+    const result = await readAfresh();
 
     expect(result).toMatchObject({
       status: "disabled",
@@ -126,7 +142,7 @@ describe("ReadReplayConfig", () => {
 
     for (const [respond, reason] of cases) {
       upstream.mockImplementationOnce(respond);
-      const result = await ReadReplayConfig.execute();
+      const result = await readAfresh();
       expect(result).toMatchObject({ status: "disabled", reason, capture: { enabled: false } });
       expect(JSON.stringify(result)).not.toContain("rrweb-private-key");
     }
@@ -139,7 +155,7 @@ describe("ReadReplayConfig", () => {
     upstream.mockResolvedValueOnce(
       jsonResponse(runtimeConfigFixture({ refreshIntervalMs: 1_000, expiresAt: NOW + 86_400_000 })),
     );
-    expect(await ReadReplayConfig.execute()).toMatchObject({
+    expect(await readAfresh()).toMatchObject({
       refreshIntervalMs: 10_000,
       expiresAt: NOW + 300_000,
     });
@@ -147,18 +163,18 @@ describe("ReadReplayConfig", () => {
     upstream.mockResolvedValueOnce(
       jsonResponse(runtimeConfigFixture({ refreshIntervalMs: 3_600_000 })),
     );
-    expect(await ReadReplayConfig.execute()).toMatchObject({ refreshIntervalMs: 60_000 });
+    expect(await readAfresh()).toMatchObject({ refreshIntervalMs: 60_000 });
   });
 
   it("lets EPIC_ENVIRONMENT override VERCEL_ENV", async () => {
     stubEpicEnv(PREVIEW_TOKEN, "production");
     vi.stubEnv("EPIC_ENVIRONMENT", "preview");
-    expect(await ReadReplayConfig.execute()).toMatchObject({ environment: "preview" });
+    expect(await readAfresh()).toMatchObject({ environment: "preview" });
     expect(upstream.mock.calls[0][0]).not.toContain("environment");
 
     stubEpicEnv(PRODUCTION_TOKEN, "production");
     vi.stubEnv("EPIC_ENVIRONMENT", "preview");
-    expect(await ReadReplayConfig.execute()).toMatchObject({ reason: "invalid_policy" });
+    expect(await readAfresh()).toMatchObject({ reason: "invalid_policy" });
   });
 
   it("never falls back to production from an invalid explicit environment", async () => {
@@ -167,7 +183,7 @@ describe("ReadReplayConfig", () => {
 
     for (const explicit of ["preveiw", "", "   "]) {
       vi.stubEnv("EPIC_ENVIRONMENT", explicit);
-      expect(await ReadReplayConfig.execute()).toMatchObject({
+      expect(await readAfresh()).toMatchObject({
         status: "disabled",
         reason: "invalid_policy",
         environment: null,
@@ -178,7 +194,7 @@ describe("ReadReplayConfig", () => {
     expect(upstream).not.toHaveBeenCalled();
 
     vi.stubEnv("EPIC_ENVIRONMENT", undefined);
-    expect(await ReadReplayConfig.execute()).toMatchObject({
+    expect(await readAfresh()).toMatchObject({
       status: "active",
       environment: "production",
     });
@@ -199,7 +215,7 @@ describe("ReadReplayConfig", () => {
         upstream.mockResolvedValueOnce(
           jsonResponse(runtimeConfigFixture({ ...flag, configVersion })),
         );
-        expect(await ReadReplayConfig.execute()).toMatchObject({
+        expect(await readAfresh()).toMatchObject({
           status: "disabled",
           reason: "invalid_policy",
           capture: { enabled: false },
@@ -217,7 +233,7 @@ describe("ReadReplayConfig", () => {
         }),
       ),
     );
-    expect(await ReadReplayConfig.execute()).toMatchObject({
+    expect(await readAfresh()).toMatchObject({
       configVersion: null,
       capture: { enabled: false },
       reporting: { enabled: false },
@@ -227,7 +243,7 @@ describe("ReadReplayConfig", () => {
 
   it("returns transport limits and rejects every credential-bearing addition", async () => {
     stubEpicEnv();
-    const valid = await ReadReplayConfig.execute();
+    const valid = await readAfresh();
     expect(valid.recording).toEqual({
       transport: "epic-http",
       limits: {
@@ -257,7 +273,7 @@ describe("ReadReplayConfig", () => {
     const outputs = [JSON.stringify(valid)];
     for (const overrides of injected) {
       upstream.mockResolvedValueOnce(jsonResponse(runtimeConfigFixture(overrides)));
-      const result = await ReadReplayConfig.execute();
+      const result = await readAfresh();
       expect(result).toMatchObject({ status: "disabled", reason: "invalid_policy" });
       outputs.push(JSON.stringify(result));
     }
@@ -272,7 +288,7 @@ describe("ReadReplayConfig", () => {
         }),
       ),
     );
-    expect(await ReadReplayConfig.execute()).toMatchObject({ reason: "invalid_policy" });
+    expect(await readAfresh()).toMatchObject({ reason: "invalid_policy" });
 
     const rendered = outputs.join(" ") + JSON.stringify(warn.mock.calls);
     for (const sentinel of [

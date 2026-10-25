@@ -79,7 +79,7 @@ function createFixture() {
   return { fetchFn, log, mode, batches: () => log.filter((entry) => entry.path.endsWith("/batches")) };
 }
 
-function setup(limits: PublicReplayConfig["recording"]["limits"] = { ...REPLAY_RECORDING_LIMITS }) {
+function setup(limits: PublicReplayConfig["recording"]["limits"] = { ...REPLAY_RECORDING_LIMITS }, random = () => 0) {
   const fixture = createFixture();
   const onRecordingLost = vi.fn();
   const uploader: ReplayUploader = createReplayUploader({
@@ -91,6 +91,7 @@ function setup(limits: PublicReplayConfig["recording"]["limits"] = { ...REPLAY_R
     isOnline: () => true,
     getViewport: () => ({ width: 390, height: 844 }),
     getPathname: () => "/checkout",
+    random,
     onRecordingLost,
   });
   return { fixture, uploader, onRecordingLost };
@@ -330,5 +331,17 @@ describe("createReplayUploader", () => {
     const keys = fixture.log.filter((entry) => entry.path === "/recordings").map((entry) => entry.body.idempotencyKey);
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("spreads a retry past the base backoff and never beyond one and a half times it", async () => {
+    const { fixture, uploader } = setup({ ...REPLAY_RECORDING_LIMITS }, () => 0.999);
+    fixture.mode.batch = "lost_ack_once";
+    uploader.push(meta(), 1);
+    uploader.push(snapshot(), 1);
+    await settle(600);
+    expect(fixture.batches()).toHaveLength(1);
+
+    await settle(200);
+    expect(fixture.batches()).toHaveLength(2);
   });
 });

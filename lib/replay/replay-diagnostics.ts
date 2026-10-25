@@ -53,6 +53,8 @@ export function createReplayDiagnostics(
   add: AddCustomEvent,
   getSettings: () => ReplayDiagnosticsSettings,
   now: () => number = () => Date.now(),
+  // Checked before a payload is built, so a page that is not being recorded pays nothing per call.
+  isRecording: () => boolean = () => true,
 ) {
   let started = false;
   let emitting = false;
@@ -83,7 +85,7 @@ export function createReplayDiagnostics(
    * lands before consent). Never produces another diagnostic, never throws.
    */
   function emit(stream: keyof typeof budgets, tag: string, payload: () => unknown) {
-    if (emitting || !active[stream] || !hasBudget(stream)) return;
+    if (emitting || !active[stream] || !isRecording() || !hasBudget(stream)) return;
     emitting = true;
     try {
       if (add(tag, payload())) {

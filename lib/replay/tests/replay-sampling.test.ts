@@ -66,4 +66,16 @@ describe("createReplaySampler", () => {
     expect([sampler.decide(policy), sampler.decide(policy)]).toEqual([true, true]);
     expect(random).toHaveBeenCalledTimes(1);
   });
+
+  it("does not read storage again once a policy's decision is known", () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem");
+    const sampler = createReplaySampler({ storage: window.sessionStorage, random: () => 0.1 });
+    const policy = { configVersion: "v1", sessionSampleRate: 0.5 };
+    sampler.decide(policy);
+    getItem.mockClear();
+
+    for (let index = 0; index < 5; index += 1) sampler.decide(policy);
+    expect(getItem).not.toHaveBeenCalled();
+    getItem.mockRestore();
+  });
 });

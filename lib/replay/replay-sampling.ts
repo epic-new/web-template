@@ -64,8 +64,13 @@ export function createReplaySampler({
 
   return {
     decide({ configVersion, sessionSampleRate }) {
+      // Asked for every recorded event, so the common case never touches storage.
+      if (memory && memory.configVersion === configVersion && memory.rate === sessionSampleRate) {
+        return memory.sampled;
+      }
       const stored = read();
       if (stored && stored.configVersion === configVersion && stored.rate === sessionSampleRate) {
+        memory = stored;
         return stored.sampled;
       }
       const sampled =

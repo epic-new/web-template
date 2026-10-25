@@ -7,7 +7,8 @@ import { REDACTED, sanitizeCssText, sanitizeReplayPayload, sanitizeUrl } from ".
  * masked inputs and text and blocked private regions; this pass removes
  * credentials from URLs and CSS anywhere in the stream, masks hidden and
  * password input values that rrweb leaves alone, and bounds the free-form
- * payloads of custom and plugin events. Returns a copy.
+ * payloads of custom and plugin events. Returns a copy, except for pointer,
+ * scroll and resize events, which hold nothing to sanitize.
  *
  * rrweb reports a changed `value` attribute as `{ id, attributes: { value } }`
  * with no tag or type, and does not mask hidden inputs even under
@@ -24,6 +25,17 @@ const CSS_ATTRIBUTES = new Set(["style", "_csstext"]);
 const SECRET_INPUT_TYPES = new Set(["hidden", "password"]);
 const NODE_TYPE_ELEMENT = 2;
 const NODE_TYPE_TEXT = 3;
+// Interaction events carry coordinates and node ids only; they are the bulk of a
+// recording, so they pass through uncopied.
+const PLAIN_SOURCES = new Set<number>([
+  IncrementalSource.MouseMove,
+  IncrementalSource.MouseInteraction,
+  IncrementalSource.Scroll,
+  IncrementalSource.ViewportResize,
+  IncrementalSource.TouchMove,
+  IncrementalSource.MediaInteraction,
+  IncrementalSource.Drag,
+]);
 
 type Json = Record<string, unknown>;
 type NodeContext = { tag: string; type: string | null };
@@ -79,6 +91,9 @@ function sanitizeRules(rules: unknown): Json[] {
 
 export function createReplayEventSanitizer() {
   const nodes = new Map<number, NodeContext>();
+  // A textarea's default value is serialized as a child text node, which
+  // rrweb's input masking does not reach.
+  const textareaText = new Set<number>();
 
   function remember(node: Json) {
     if (typeof node.id !== "number") return;
@@ -99,7 +114,7 @@ export function createReplayEventSanitizer() {
     return context.tag === "input" && context.type !== null && SECRET_INPUT_TYPES.has(context.type);
   }
 
-  function sanitizeNode(node: Json) {
+  function sanitizeNode(node: Json, inTextarea = false) {
     remember(node);
     if (node.type === NODE_TYPE_ELEMENT && isObject(node.attributes)) {
       const attributes = node.attributes;
@@ -111,16 +126,25 @@ export function createReplayEventSanitizer() {
       }
     }
     if (node.type === NODE_TYPE_TEXT && typeof node.textContent === "string") {
-      node.textContent = sanitizeCssText(node.textContent);
+      if (inTextarea) {
+        node.textContent = maskValue(node.textContent);
+        if (typeof node.id === "number") textareaText.add(node.id);
+      } else node.textContent = sanitizeCssText(node.textContent);
     }
     if (Array.isArray(node.childNodes)) {
-      for (const child of node.childNodes) if (isObject(child)) sanitizeNode(child);
+      const isTextarea =
+        node.type === NODE_TYPE_ELEMENT && typeof node.tagName === "string" && node.tagName.toLowerCase() === "textarea";
+      for (const child of node.childNodes) if (isObject(child)) sanitizeNode(child, isTextarea);
     }
   }
 
   function sanitizeMutation(data: Json) {
     if (Array.isArray(data.adds)) {
-      for (const add of data.adds) if (isObject(add) && isObject(add.node)) sanitizeNode(add.node);
+      for (const add of data.adds) {
+        if (!isObject(add) || !isObject(add.node)) continue;
+        const parent = typeof add.parentId === "number" ? nodes.get(add.parentId) : undefined;
+        sanitizeNode(add.node, parent?.tag === "textarea");
+      }
     }
     if (Array.isArray(data.attributes)) {
       for (const mutation of data.attributes) {
@@ -138,7 +162,9 @@ export function createReplayEventSanitizer() {
     }
     if (Array.isArray(data.texts)) {
       for (const text of data.texts) {
-        if (isObject(text) && typeof text.value === "string") text.value = sanitizeCssText(text.value);
+        if (!isObject(text) || typeof text.value !== "string") continue;
+        text.value =
+          typeof text.id === "number" && textareaText.has(text.id) ? maskValue(text.value) : sanitizeCssText(text.value);
       }
     }
   }
@@ -175,6 +201,9 @@ export function createReplayEventSanitizer() {
 
   return {
     sanitize(event: eventWithTime): eventWithTime {
+      if (event.type === EventType.IncrementalSnapshot && PLAIN_SOURCES.has((event.data as Json).source as number)) {
+        return event;
+      }
       const copy = JSON.parse(JSON.stringify(event)) as eventWithTime & { data: Json };
       const data = copy.data as Json;
 
@@ -184,6 +213,7 @@ export function createReplayEventSanitizer() {
           break;
         case EventType.FullSnapshot:
           nodes.clear();
+          textareaText.clear();
           if (isObject(data.node)) sanitizeNode(data.node);
           break;
         case EventType.IncrementalSnapshot:
@@ -206,6 +236,7 @@ export function createReplayEventSanitizer() {
     /** Forgets node context, e.g. when a boundary ends. */
     reset(): void {
       nodes.clear();
+      textareaText.clear();
     },
   };
 }

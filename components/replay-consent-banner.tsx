@@ -4,7 +4,11 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { epicReplayConsent } from "@/lib/replay/replay-consent";
-import { chooseReplayConsent, readReplayConsentChoice } from "@/lib/replay/replay-consent-choice";
+import {
+  chooseReplayConsent,
+  followReplayConsentWithdrawals,
+  readReplayConsentChoice,
+} from "@/lib/replay/replay-consent-choice";
 
 const COPY = {
   body: "This app records how its pages are used, with anything you type hidden, to help fix problems faster.",
@@ -29,6 +33,7 @@ export function ReplayConsentBanner() {
   useEffect(() => {
     const stored = readReplayConsentChoice();
     if (stored) chooseReplayConsent(stored);
+    return followReplayConsentWithdrawals();
   }, []);
 
   if (consent !== "unknown") return null;

@@ -44,12 +44,16 @@ export interface ReplayRecordingPipelineOptions
 // A recording must upload this many batches before the budget refills.
 const RECOVERY_BATCHES = 2;
 // Failures that no fresh recording can fix; capture stops until policy changes.
+// After an outage every client fails its attempts together; a fresh recording
+// that registered at once would bring them all back at the same moment.
+const RESTART_DELAY_MS = { min: 2_000, spread: 8_000 } as const;
 const RESUMABLE_STOPS = new Set<ReplayUploadReason>(["capture_disabled", "REPLAY_CREDENTIAL_INVALID"]);
 
 export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOptions) {
   const { getPolicy = () => replayLifecycle.getSnapshot(), ...rest } = options;
   const subscribePolicy = rest.subscribePolicy ?? ((listener: () => void) => replayLifecycle.subscribe(listener));
 
+  const random = rest.random ?? Math.random;
   let restarts = 0;
   let restartsExhausted = false;
   let started = false;
@@ -74,6 +78,8 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
       const policy = getPolicy();
       return policy.status === "active" ? policy.capture.diagnostics : { console: false, network: false };
     },
+    undefined,
+    () => session.getState().status === "capturing",
   );
   const session = createReplayCaptureSession({
     ...rest,
@@ -105,7 +111,9 @@ export function createReplayRecordingPipeline(options: ReplayRecordingPipelineOp
   function onLost(reason: ReplayUploadReason) {
     // Never re-enter the sink from inside the transport's own call stack.
     clearTimeout(restartTimer);
-    restartTimer = setTimeout(() => recover(reason), 0);
+    const delay =
+      reason === "attempts_exhausted" ? RESTART_DELAY_MS.min + random() * RESTART_DELAY_MS.spread : 0;
+    restartTimer = setTimeout(() => recover(reason), delay);
   }
 
   function recover(reason: ReplayUploadReason) {

@@ -56,6 +56,18 @@ describe("replay diagnostics", () => {
     expect(recorded).toEqual([]);
   });
 
+  it("builds nothing while the page is not being recorded", () => {
+    settings = { console: true, network: false };
+    const add = vi.fn(() => true);
+    const diagnostics = createReplayDiagnostics(add, () => settings, undefined, () => false);
+    diagnostics.start();
+
+    console.warn("password=synthetic-secret");
+
+    expect(add).not.toHaveBeenCalled();
+    diagnostics.stop();
+  });
+
   it("records only the stream that is on, and the page's call still happens", async () => {
     settings = { console: true, network: false };
     const diagnostics = create();

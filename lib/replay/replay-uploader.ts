@@ -93,11 +93,16 @@ export interface ReplayUploaderOptions {
   getViewport?: () => { width: number; height: number } | null;
   getPathname?: () => string;
   randomUUID?: () => string;
+  /** Spreads retries so clients that failed together do not return together. */
+  random?: () => number;
   onRecordingLost?: (reason: ReplayUploadReason) => void;
   baseUrl?: string;
 }
 
 const BACKOFF_MS = [500, 1_000, 2_000];
+const MAX_BACKOFF_JITTER = 0.5;
+// A server-provided pause longer than this would outlive the buffer's retention anyway.
+const MAX_RETRY_AFTER_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 12_000;
 const OFFLINE_POLL_MS = 500;
 const STATE_THROTTLE_MS = 250;
@@ -182,6 +187,7 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
     getViewport = defaultViewport,
     getPathname = () => window.location.pathname,
     randomUUID = () => crypto.randomUUID(),
+    random = Math.random,
   } = options;
 
   let segments: Segment[] = [];
@@ -616,7 +622,8 @@ export function createReplayUploader(options: ReplayUploaderOptions) {
       return;
     }
     const backoff = BACKOFF_MS[Math.min(segment.attempts - 1, BACKOFF_MS.length - 1)]!;
-    segment.retryAt = monotonicNow() + Math.max(backoff, retryAfterMs ?? 0);
+    const pause = Math.max(backoff, Math.min(retryAfterMs ?? 0, MAX_RETRY_AFTER_MS));
+    segment.retryAt = monotonicNow() + pause * (1 + MAX_BACKOFF_JITTER * random());
   }
 
   // The exact action for each failure (EPI-210 normative error table).

@@ -1,5 +1,7 @@
 import "server-only";
 
+import { z } from "zod";
+
 import {
   replayCapabilityRequestSchema,
   type ReplayRecordingResponse,
@@ -37,6 +39,9 @@ export class RenewReplayCapability {
       if (!client || !secret) throw new ReplayUploadError("not_configured");
 
       const subjectId = deriveReplaySubject(command.actor, secret);
+      if (!z.string().uuid().safeParse(command.recordingId).success) {
+        throw new ReplayUploadError("recording_not_found");
+      }
       const record = await ReplayRecordingModel.findByRecordingId(command.recordingId);
       this.authorize({ subjectId }, record);
 

@@ -197,7 +197,8 @@ export function sanitizeReplayPayload(value: unknown): unknown {
 
 // Each part is bounded so a long run of word characters cannot backtrack for long.
 const EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,6}\.[A-Za-z]{2,24}/g;
-const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+// Also a JWT cut short by a length bound, which would otherwise keep its header and payload.
+const JWT = /\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*){0,2}/g;
 const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const PROVIDER_KEY = /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b/g;
 const KEY_VALUE = /\b(password|passwd|secret|token|api[-_]?key|authorization)(["']?\s*[:=]\s*["']?)[^"'\s,;}&]{1,256}/gi;

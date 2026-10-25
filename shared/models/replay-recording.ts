@@ -22,7 +22,54 @@ export interface ReplayRateDecision {
   retryAfterMs: number;
 }
 
+// A bound recording never changes subject, so a confirmed owner stays true for
+// as long as the row exists; the TTL only bounds how long a pruned row lingers.
+const OWNERSHIP_TTL_MS = 5 * 60_000;
+const OWNERSHIP_MAX_ENTRIES = 10_000;
+const ownership = new Map<string, number>();
+
+const RATE_ROW_RETENTION_MS = 60 * 60_000;
+const RECORDING_RETENTION_MS = 30 * 24 * 60 * 60_000;
+const PRUNE_EVERY_MS = 10 * 60_000;
+let lastPrunedAt = 0;
+
 export class ReplayRecordingModel {
+  static isOwnershipKnown(recordingId: string, subjectId: string, now = Date.now()): boolean {
+    const key = `${recordingId}\u0000${subjectId}`;
+    const expiresAt = ownership.get(key);
+    if (expiresAt === undefined) return false;
+    if (expiresAt <= now) {
+      ownership.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  static rememberOwnership(recordingId: string, subjectId: string, now = Date.now()): void {
+    if (ownership.size >= OWNERSHIP_MAX_ENTRIES) {
+      const oldest = ownership.keys().next().value;
+      if (oldest !== undefined) ownership.delete(oldest);
+    }
+    ownership.set(`${recordingId}\u0000${subjectId}`, now + OWNERSHIP_TTL_MS);
+  }
+
+  static clearOwnershipCache(): void {
+    ownership.clear();
+    lastPrunedAt = 0;
+  }
+
+  /**
+   * Deletes spent rate counters and recordings past their retention. Runs at
+   * most once per interval per process, from the unauthenticated entry points
+   * that create rows, so the tables stay bounded without a cron.
+   */
+  static async pruneStale(now = Date.now(), executor: DatabaseExecutor = db): Promise<void> {
+    if (now - lastPrunedAt < PRUNE_EVERY_MS) return;
+    lastPrunedAt = now;
+    await executor.delete(replayRateLimit).where(lt(replayRateLimit.windowStartedAt, now - RATE_ROW_RETENTION_MS));
+    await executor.delete(replayRecording).where(lt(replayRecording.updatedAt, new Date(now - RECORDING_RETENTION_MS)));
+  }
+
   static async findByIdempotencyKey(
     subjectId: string,
     idempotencyKey: string,

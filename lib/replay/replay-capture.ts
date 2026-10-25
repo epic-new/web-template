@@ -87,13 +87,26 @@ export function createReplayCaptureSession({
     for (const listener of [...listeners]) listener();
   }
 
+  // Every recorded event is admitted through here, so an unchanged answer is
+  // reused: the policy object changes whenever the policy or its expiry does.
+  let allowedMemo: { policy: PublicReplayConfig; consent: string; pathname: string } | null = null;
+
   function permission(pathname: string) {
     const policy = getPolicy();
-    return {
+    const consentState = consent.getSnapshot();
+    if (
+      allowedMemo &&
+      allowedMemo.policy === policy &&
+      allowedMemo.consent === consentState &&
+      allowedMemo.pathname === pathname
+    ) {
+      return { policy, result: { allowed: true } as const };
+    }
+    const evaluated = {
       policy,
       result: evaluateCapturePermission({
         policy,
-        consent: consent.getSnapshot(),
+        consent: consentState,
         pathname: normalizeReplayPath(pathname),
         sampled: () =>
           sampler.decide({
@@ -102,6 +115,8 @@ export function createReplayCaptureSession({
           }),
       }),
     };
+    allowedMemo = evaluated.result.allowed ? { policy, consent: consentState, pathname } : null;
+    return evaluated;
   }
 
   function stopRecorder() {

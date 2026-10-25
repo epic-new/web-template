@@ -21,7 +21,12 @@ export class ReplayUploadError extends Error {
   ) {
     super(REPLAY_UPLOAD_ERROR_MESSAGES[code]);
     this.name = "ReplayUploadError";
-    this.status = extras.status ?? REPLAY_UPLOAD_ERROR_STATUS[code];
+    // Epic's status is relayed as-is only when it is a real error status.
+    const upstream = extras.status;
+    this.status =
+      upstream !== undefined && Number.isInteger(upstream) && upstream >= 400 && upstream <= 599
+        ? upstream
+        : REPLAY_UPLOAD_ERROR_STATUS[code];
   }
 
   toBody(): ReplayUploadErrorBody {

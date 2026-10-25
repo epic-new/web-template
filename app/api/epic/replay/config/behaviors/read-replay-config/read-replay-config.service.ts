@@ -30,6 +30,19 @@ const VERCEL_ENVIRONMENTS = new Set<ReplayEnvironment>([
   "development",
 ]);
 
+// The route is public and unauthenticated, so without this every page load
+// would cost one call to Epic under the publishing credential.
+const RESOURCE_TTL_MS = 10_000;
+
+interface CachedResource {
+  key: string;
+  expiresAt: number;
+  value?: RuntimeConfigResourceRecord;
+  pending?: Promise<RuntimeConfigResourceRecord>;
+}
+
+let cached: CachedResource | null = null;
+
 /**
  * Resolves this deployment's replay policy. Takes no command on purpose: scope
  * comes only from the server's own configuration and credential, so nothing a
@@ -54,7 +67,7 @@ export class ReadReplayConfig {
 
     let resource: RuntimeConfigResourceRecord;
     try {
-      resource = await RuntimeConfigResource.fetch(client);
+      resource = await ReadReplayConfig.fetchResource(client, env);
     } catch (error) {
       return disabled(
         error instanceof EpicIntegrationError
@@ -90,6 +103,36 @@ export class ReadReplayConfig {
     );
     if (!result.success) return disabled("invalid_policy");
     return result.data;
+  }
+
+  /** Drops the short-lived upstream cache (tests, and a rotated credential). */
+  static resetCache(): void {
+    cached = null;
+  }
+
+  // Concurrent callers share one upstream call; failures are never cached.
+  private static fetchResource(client: EpicClient, env: Env): Promise<RuntimeConfigResourceRecord> {
+    const key = `${env.EPIC_API_URL}|${client.projectId}|${env.EPIC_PUBLISHING_TOKEN}`;
+    const now = Date.now();
+    if (cached?.key === key && cached.expiresAt > now) {
+      if (cached.value) return Promise.resolve(cached.value);
+      if (cached.pending) return cached.pending;
+    }
+
+    const entry: CachedResource = { key, expiresAt: now + RESOURCE_TTL_MS };
+    entry.pending = RuntimeConfigResource.fetch(client).then(
+      (value) => {
+        entry.value = value;
+        entry.pending = undefined;
+        return value;
+      },
+      (error) => {
+        if (cached === entry) cached = null;
+        throw error;
+      },
+    );
+    cached = entry;
+    return entry.pending;
   }
 
   // Returns null when EPIC_ENVIRONMENT is present but not a valid environment.
