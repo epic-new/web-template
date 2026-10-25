@@ -49,4 +49,18 @@ describe("ReplayRecordingModel", () => {
     await expect(consume(10_200)).resolves.toEqual({ allowed: false, retryAfterMs: 800 });
     await expect(consume(11_000)).resolves.toEqual({ allowed: true, retryAfterMs: 0 });
   });
+
+  it("prunes only a bucket's counters whose window ended before the cutoff", async () => {
+    const window = { limit: 1, windowMs: 1_000 };
+    await ReplayRecordingModel.consumeRate("ip_old", "identity", { ...window, now: 1_000 });
+    await ReplayRecordingModel.consumeRate("ip_new", "identity", { ...window, now: 50_000 });
+    await ReplayRecordingModel.consumeRate("sub_old", "batch", { ...window, now: 1_000 });
+
+    await ReplayRecordingModel.pruneRate("identity", 10_000);
+
+    // A pruned counter starts over; the kept ones are still spent.
+    await expect(ReplayRecordingModel.consumeRate("ip_old", "identity", { ...window, now: 50_100 })).resolves.toMatchObject({ allowed: true });
+    await expect(ReplayRecordingModel.consumeRate("ip_new", "identity", { ...window, now: 50_100 })).resolves.toMatchObject({ allowed: false });
+    await expect(ReplayRecordingModel.consumeRate("sub_old", "batch", { ...window, now: 1_100 })).resolves.toMatchObject({ allowed: false });
+  });
 });

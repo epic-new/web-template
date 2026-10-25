@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     const { mintVisitor } = await AcknowledgeReplayIdentity.execute({
       user: await resolveReplayUser(),
       visitorId: resolveReplayVisitor(request),
-      clientAddress: request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip"),
+      clientAddress: clientAddress(request),
       input,
     });
 
@@ -61,4 +61,16 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     return replayErrorResponse(error);
   }
+}
+
+/**
+ * The address the platform saw, not one the client wrote: the platform's own
+ * header first, then the hop the nearest proxy appended (the rightmost
+ * `x-forwarded-for` entry) — the first entry is whatever the client sent.
+ */
+function clientAddress(request: NextRequest): string | null {
+  const platform = request.headers.get("x-vercel-forwarded-for") ?? request.headers.get("x-real-ip");
+  if (platform) return platform.split(",")[0]!.trim();
+  const hops = request.headers.get("x-forwarded-for")?.split(",").map((hop) => hop.trim()).filter(Boolean);
+  return hops?.at(-1) ?? null;
 }

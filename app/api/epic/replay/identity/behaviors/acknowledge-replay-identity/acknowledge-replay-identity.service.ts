@@ -50,8 +50,10 @@ export class AcknowledgeReplayIdentity {
       if (command.visitorId !== null) return { mintVisitor: false };
 
       // Keyed by an HMAC so no raw address is stored.
-      const addressKey = `ip_${createHmac("sha256", replaySecret()!).update(command.clientAddress ?? "unknown").digest("base64url")}`;
-      const rate = await ReplayRecordingModel.consumeRate(addressKey, "identity", { ...VISITOR_MINT_RATE, now: Date.now() });
+      const addressKey = `ip_${createHmac("sha256", replaySecret()!).update(`ip:${command.clientAddress ?? "unknown"}`).digest("base64url")}`;
+      const now = Date.now();
+      await ReplayRecordingModel.pruneRate("identity", now - 10 * VISITOR_MINT_RATE.windowMs);
+      const rate = await ReplayRecordingModel.consumeRate(addressKey, "identity", { ...VISITOR_MINT_RATE, now });
       if (!rate.allowed) throw new ReplayUploadError("rate_limited", { retryAfterMs: rate.retryAfterMs });
       return { mintVisitor: true };
     } catch (error) {

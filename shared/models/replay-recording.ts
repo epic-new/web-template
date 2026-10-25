@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, sql } from "drizzle-orm";
 
 import { db, type DatabaseExecutor } from "@/db";
 import {
@@ -139,5 +139,12 @@ export class ReplayRecordingModel {
     if (row && row.count <= limit) return { allowed: true, retryAfterMs: 0 };
     const windowStartedAt = row?.windowStartedAt ?? now;
     return { allowed: false, retryAfterMs: Math.max(windowStartedAt + windowMs - now, 1) };
+  }
+
+  /** Drop a bucket's counters whose window ended long ago, so per-address rows do not pile up. */
+  static async pruneRate(bucket: ReplayRateBucket, olderThan: number, executor: DatabaseExecutor = db): Promise<void> {
+    await executor
+      .delete(replayRateLimit)
+      .where(and(eq(replayRateLimit.bucket, bucket), lt(replayRateLimit.windowStartedAt, olderThan)));
   }
 }
