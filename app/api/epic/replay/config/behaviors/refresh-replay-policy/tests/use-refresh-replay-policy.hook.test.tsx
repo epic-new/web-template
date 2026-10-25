@@ -182,7 +182,30 @@ describe("useRefreshReplayPolicy", () => {
       });
     });
 
-    it("holds capture on resume until a fresh policy arrives", async () => {
+    it("keeps capturing across a tab switch while a fresh policy is fetched", async () => {
+      let release!: () => void;
+      let fetched = 0;
+      const { result } = await renderLoaded();
+
+      sameOrigin = () =>
+        new Promise((resolve) => {
+          fetched += 1;
+          release = () => resolve(GET());
+        });
+      setVisibility("hidden");
+      setVisibility("visible");
+      await settle();
+
+      expect(fetched).toBe(1);
+      expect(replayLifecycle.getSnapshot()).toMatchObject({ status: "active" });
+      expect(result.current.policy.capture.enabled).toBe(true);
+
+      release();
+      await settle();
+      expect(result.current.policy).toMatchObject({ status: "active", configVersion: "prod-v3" });
+    });
+
+    it("holds capture after the page was frozen until a fresh policy arrives", async () => {
       let release!: () => void;
       const { result } = await renderLoaded();
 
@@ -190,8 +213,9 @@ describe("useRefreshReplayPolicy", () => {
         new Promise((resolve) => {
           release = () => resolve(GET());
         });
-      setVisibility("hidden");
-      setVisibility("visible");
+      act(() => {
+        document.dispatchEvent(new Event("resume"));
+      });
       await settle();
 
       expect(replayLifecycle.getSnapshot()).toMatchObject({

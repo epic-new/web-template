@@ -33,8 +33,12 @@ export function useRefreshReplayPolicy() {
     if (receivedAt !== undefined) replayLifecycle.apply(data, { receivedAt });
   }, [data]);
 
-  // On resume, or when the clocks disagree, withhold capture until a fresh
-  // response arrives and ask for one now.
+  // When the page was frozen (resume, back/forward cache) or the clocks
+  // disagree, elapsed time cannot be trusted: withhold capture until a fresh
+  // response arrives. Returning to a tab that was merely hidden suspends
+  // nothing, so it only asks for a fresh policy: gating there ended the
+  // recording and opened a new one on every tab switch, a session cut in
+  // pieces and each piece billed. An expired policy still stops capture.
   useEffect(() => {
     const untrusted = () => {
       replayLifecycle.gate();
@@ -47,7 +51,7 @@ export function useRefreshReplayPolicy() {
         wasHidden = true;
       } else if (wasHidden) {
         wasHidden = false;
-        untrusted();
+        void refetch({ cancelRefetch: false });
       }
     };
     const onPageShow = (event: PageTransitionEvent) => {
