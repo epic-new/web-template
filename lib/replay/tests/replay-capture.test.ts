@@ -365,4 +365,26 @@ describe("createReplayCaptureSession", () => {
     expect(session.getState()).toMatchObject({ status: "blocked", reason: "policy_disabled" });
     expect(() => window.history.pushState({}, "", "/other")).not.toThrow();
   });
+
+  it("restarts a boundary with fresh Meta and FullSnapshot only while still permitted", () => {
+    const fake = fakeRecord();
+    const { session, buffer, setPolicy } = setup({ record: fake.record });
+    dispose = session.dispose;
+    epicReplayConsent.grant();
+    session.start();
+
+    session.restartBoundary();
+
+    expect(fake.stop).toHaveBeenCalledTimes(1);
+    expect(session.getState()).toMatchObject({ status: "capturing", boundary: 2 });
+    expect(buffer.events().filter((entry) => entry.boundary === 2).map((entry) => entry.event.type)).toEqual([
+      EventType.Meta,
+      EventType.FullSnapshot,
+    ]);
+
+    setPolicy(disabledReplayConfig({ reason: "not_configured", environment: null, release: null, now: 0 }), false);
+    session.restartBoundary();
+    expect(session.getState()).toMatchObject({ status: "blocked", boundary: 2 });
+    expect(fake.record).toHaveBeenCalledTimes(2);
+  });
 });

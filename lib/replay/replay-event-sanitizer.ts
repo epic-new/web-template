@@ -180,7 +180,9 @@ export function createReplayEventSanitizer() {
 
       switch (copy.type) {
         case EventType.Meta:
-          if (typeof data.href === "string") data.href = sanitizeUrl(data.href);
+          // The publishing contract carries a document URL without query or
+          // fragment; redacted query values are still not part of that wire shape.
+          if (typeof data.href === "string") data.href = sanitizeUrl(data.href).split(/[?#]/, 1)[0];
           break;
         case EventType.FullSnapshot:
           nodes.clear();

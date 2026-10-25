@@ -253,6 +253,24 @@ export function createReplayCaptureSession({
       evaluate();
     },
 
+    /**
+     * Ends the current boundary and, if capture is still permitted, starts a
+     * new one at once with fresh Meta and FullSnapshot events. The upload
+     * pipeline calls it when a recording was lost (e.g. delivery uncertain).
+     */
+    restartBoundary(): void {
+      if (!started) return;
+      clearTimeout(pendingStart);
+      pendingStart = undefined;
+      stopRecorder();
+      const { policy, result } = permission(getPathname());
+      if (!result.allowed) {
+        block(result.reason);
+        return;
+      }
+      if (!failed) startRecorder(policy);
+    },
+
     /** Re-evaluates now, e.g. after the policy source was swapped. */
     refresh(): void {
       failed = false;

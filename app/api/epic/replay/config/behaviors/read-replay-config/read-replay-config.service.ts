@@ -22,6 +22,8 @@ const ERROR_REASONS: Record<EpicIntegrationError["code"], ReplayDisabledReason> 
   unauthorized: "unauthorized",
   unavailable: "upstream_unavailable",
   invalid_response: "invalid_policy",
+  // The runtime-config GET never yields a typed rejection; kept total.
+  rejected: "upstream_unavailable",
 };
 
 const VERCEL_ENVIRONMENTS = new Set<ReplayEnvironment>([

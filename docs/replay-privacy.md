@@ -112,3 +112,90 @@ recording that is already sampled in.
   duration. Request and response headers and bodies are never included, and
   the replay configuration, ingestion and report endpoints (`/api/epic/replay/*`)
   are never diagnosed.
+
+## Upload
+
+`lib/replay/replay-uploader.ts` turns each capture boundary into one recording
+and sends it through this application's same-origin relay
+(`POST /api/epic/replay/recordings`, `.../[recordingId]/capability`,
+`.../[recordingId]/batches`), which forwards it to Epic central ingestion
+(EPI-210 v1). The browser never talks to Epic or rrweb Cloud directly and
+never holds a publishing credential. The development harness at
+`/styleguide/replay/upload` drives it against the real relay or a labelled
+synthetic fixture.
+
+### Identity and ownership
+
+- Project, application and environment come only from the server's publishing
+  credential (`EPIC_API_URL`, `EPIC_PROJECT_ID`, `EPIC_PUBLISHING_TOKEN`).
+- The subject is an opaque `sub_...` HMAC derived on the server from the
+  signed-in user id, keyed with the stable `BETTER_AUTH_SECRET` - never the
+  rotating publishing token, never an email or name. Rotating the publishing
+  token keeps every subject; rotating `BETTER_AUTH_SECRET` starts new ones.
+- Anonymous capture is off by default. With
+  `EPIC_REPLAY_ANONYMOUS_CAPTURE=allow`, registration (and only registration)
+  mints a random visitor id in a signed, HttpOnly `epic-replay-visitor`
+  cookie scoped to `/api/epic/replay`; a tampered cookie is ignored.
+- A browser body carrying `subjectId`, `projectId`, `applicationId`,
+  `environment`, `captureContext`, a Cloud id or any unknown field is a 400
+  `invalid_request`. A recording id this server never bound to the current
+  subject answers the same 404 `recording_not_found` as an unknown one.
+- Missing credential or identity secret answers 503 `not_configured`; no other
+  write path is tried.
+
+### What is sent
+
+The registration carries a frozen idempotency key, the first event's
+`startedAt`, a safe pathname (no query or fragment), recorder and config
+versions, the document's own build release (or null - never the server's
+current deployment) and a clamped viewport. The server adds the subject and a
+coarse `captureContext` (browser and OS family with a 1-4 digit major version,
+device class, viewport) parsed from its own request. It persists that
+normalized payload and resends it verbatim on a retry under the same key, so a
+later User-Agent or deployment change never re-derives it; a changed body
+under the same key is a 409 `idempotency_conflict`. Raw User-Agent, IP,
+location, cookies, title, referrer and screen size are never collected or
+forwarded, and the relay never copies incoming headers upstream. No event,
+capability or token is stored on the server.
+
+### Bounds
+
+- No batch is sent before a successful registration. Meanwhile events wait in
+  memory bounded by `maxBufferBytes` and `maxBufferAgeMs`, measured from the
+  oldest held event on a monotonic clock; a forward wall-clock jump or a
+  suspension counts as elapsed time, a backward jump never extends retention.
+  Over either bound the recording ends `buffer_exceeded` and its local events
+  are discarded.
+- Batches hold at most `maxBatchEvents` events and their complete UTF-8 JSON
+  request, plus a 128-byte allowance for the subject the server injects, is at
+  most `maxBatchBytes` (1 MiB). The relay enforces the same limit on the bytes
+  actually streamed and again on the augmented central request; there is no
+  extra envelope allowance. An event that alone exceeds the limit (typically a
+  FullSnapshot) ends the recording `snapshot_too_large`: never truncated,
+  never fragmented.
+- One request in flight per recording. A batch's id, sequence, events and
+  `final` flag are frozen before its first attempt, and only that frozen body
+  is ever retried: up to `maxAttempts` (3) for network errors, 503 and 429,
+  with backoff 500 ms, 1 s, 2 s and any `retryAfterMs`. Offline, no attempt is
+  spent and the retention bounds keep running.
+- Per-subject server rates: 10 registrations, 30 capability renewals and 120
+  batches per minute.
+
+### Uncertainty and availability
+
+- `capability_expired` renews once and resends the identical batch; renewal's
+  `nextSequence` never renumbers it. `out_of_order` ends the recording as
+  incomplete.
+- `delivery_uncertain` is never resent: the recording is quarantined, its
+  local events discarded, and - at most `maxAttempts` times per page - a fresh
+  recording starts with a new key and a new FullSnapshot.
+- Central receipts are the authority. A recording the server has cached as
+  closed or quarantined still reaches Epic, so an exact retry recovers its
+  original accepted or finalized acknowledgment.
+- The state's `evidence` is always `"unverified"`. "Registered" and "Pending -
+  received, playback not verified" are the furthest a recording gets here;
+  `finalized` (an empty final batch) is metadata only. Only a central
+  provider-read check can make a recording playable, and this template has none.
+- Withdrawing consent stops capture and drops queued local data. It does not
+  delete anything already uploaded, and earlier recording references stay in
+  the transport's history.
