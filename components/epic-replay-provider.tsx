@@ -74,7 +74,19 @@ function statusOf(pipeline: ReplayPipelineState | null, identity: Identity, arme
  * server-rendered root layout. It is frozen into each registration and never
  * replaced by a later policy refresh.
  */
-export function EpicReplayProvider({ release = null, children }: { release?: string | null; children: ReactNode }) {
+export function EpicReplayProvider({
+  release = null,
+  anonymousCapture = false,
+  anonymousReporting = false,
+  children,
+}: {
+  release?: string | null;
+  /** Whether this server records signed-out visitors (`EPIC_REPLAY_ANONYMOUS_CAPTURE`). */
+  anonymousCapture?: boolean;
+  /** Whether this server accepts reports from signed-out visitors (`EPIC_REPLAY_ANONYMOUS_REPORTING`). */
+  anonymousReporting?: boolean;
+  children: ReactNode;
+}) {
   const policy = useSyncExternalStore(replayLifecycle.subscribe, replayLifecycle.getSnapshot, () => serverPolicy);
   const session = authClient.useSession();
   const userId = session.data?.user?.id ?? null;
@@ -136,7 +148,9 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
     };
   }, [armed, identityPending, userId, release]);
 
-  const reportingEnabled = policy.status === "active" && policy.reporting.enabled;
+  // A signed-out visitor is offered the button only where their report would be accepted.
+  const reportingEnabled =
+    policy.status === "active" && policy.reporting.enabled && (Boolean(userId) || anonymousReporting);
 
   const value = useMemo<EpicReplay>(() => {
     const { status, reason } = statusOf(pipelineState, identity, armed);
@@ -156,7 +170,8 @@ export function EpicReplayProvider({ release = null, children }: { release?: str
   return (
     <EpicReplayContext.Provider value={value}>
       {children}
-      {armed ? <ReplayConsentBanner /> : null}
+      {/* Consent is asked only where a recording could actually follow. */}
+      {armed && (userId || anonymousCapture) ? <ReplayConsentBanner /> : null}
       {reportingEnabled ? <ReplayReportButton release={release} /> : null}
     </EpicReplayContext.Provider>
   );

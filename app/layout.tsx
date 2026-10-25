@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { PreviewBridge } from "@/components/preview-bridge";
 import { PreviewToolbarLoader } from "@/components/preview-toolbar-loader";
 import { EpicReplayProvider } from "@/components/epic-replay-provider";
+import { isAnonymousReplayAllowed } from "@/lib/replay/server/replay-request";
 import { ReplayPolicyLoader } from "@/components/replay-policy-loader";
 import "./globals.css";
 
@@ -42,7 +43,13 @@ export default function RootLayout({
           {/* Records permitted sessions and offers the report button. It
               starts nothing until the policy enables capture and the host
               grants consent; see docs/replay-privacy.md. */}
-          <EpicReplayProvider release={documentRelease}>{children}</EpicReplayProvider>
+          <EpicReplayProvider
+            release={documentRelease}
+            anonymousCapture={isAnonymousReplayAllowed("capture")}
+            anonymousReporting={isAnonymousReplayAllowed("report")}
+          >
+            {children}
+          </EpicReplayProvider>
           {/* Mounted at the root so every route group can raise a toast. It
               used to live only in `app/admin/layout.tsx`, which meant a
               `toast()` anywhere else — the whole `(app)` group — rendered

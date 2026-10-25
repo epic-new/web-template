@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { epicReplayConsent } from "@/lib/replay/replay-consent";
 
 const COPY = {
-  body: "This app records how pages are used, with text and inputs masked, to help fix problems faster.",
+  body: "This app records how its pages are used, with anything you type hidden, to help fix problems faster.",
   allow: "Allow",
   decline: "No thanks",
 };

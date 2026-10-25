@@ -19,7 +19,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
       >
         <Provider>{children}</Provider>
       </ThemeProvider>
-      <ReactQueryDevtools initialIsOpen={false} />
+      {/* Bottom-right belongs to the Epic Replay report button. */}
+      <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
     </QueryClientProvider>
   );
 }
