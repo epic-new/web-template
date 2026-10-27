@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import type { ColumnDef } from "@tanstack/react-table";
 import { Skeleton } from "@/components/ui/skeleton";
 
 import { DataTable } from "./components/data-table";
@@ -18,6 +17,7 @@ import { useEditRow } from "./behaviors/edit-row/use-edit-row.hook";
 import { useDeleteRow } from "./behaviors/delete-row/use-delete-row.hook";
 
 import type { TableRow } from "./state";
+import type { DataTableColumn } from "./table-features";
 
 export function TableViewContent({
   actorId,
@@ -74,10 +74,10 @@ export function TableViewContent({
   } = useDeleteRow(actorId, tableName);
 
   // Build column definitions
-  const tableColumns: ColumnDef<TableRow>[] = React.useMemo(() => {
+  const tableColumns: DataTableColumn[] = React.useMemo(() => {
     if (columns.length === 0) return [];
 
-    const cols: ColumnDef<TableRow>[] = columns.map((col) => ({
+    const cols: DataTableColumn[] = columns.map((col) => ({
       accessorKey: col.name,
       header: () => (
         <ColumnHeader

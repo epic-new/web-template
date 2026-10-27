@@ -22,7 +22,7 @@ import { Separator } from '@/components/ui/separator'
 import {
   Cloud,
   CreditCard,
-  Github,
+  GitBranch,
   Keyboard,
   LifeBuoy,
   LogOut,
@@ -607,7 +607,7 @@ const [showActivityBar, setShowActivityBar] = React.useState(false)
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem>
-                  <Github />
+                  <GitBranch />
                   <span>GitHub</span>
                 </DropdownMenuItem>
                 <DropdownMenuItem>

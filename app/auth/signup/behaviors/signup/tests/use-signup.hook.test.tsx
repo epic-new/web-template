@@ -33,11 +33,15 @@ describe("signup hook scenarios", () => {
 
     act(() => result.current.formAction(form));
 
+    // The mutation starts after this call returns, so wait for its outcome,
+    // not for a loading flag that is already false before it begins.
+    await waitFor(async () => {
+      await PostDB(db, schema, {
+        user: [{ email, emailVerified: false }],
+        account: [{ providerId: "credential" }],
+      });
+    });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.state.error).toBeNull();
-    await PostDB(db, schema, {
-      user: [{ email, emailVerified: false }],
-      account: [{ providerId: "credential" }],
-    });
   });
 });

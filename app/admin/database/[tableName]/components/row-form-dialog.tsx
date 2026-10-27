@@ -51,48 +51,58 @@ export function RowFormDialog({
         : "Fill in the fields below to create a new row.")
     : "Make changes to the row. Click save when you are done.";
 
-  // Reset form when dialog opens/closes or row changes
-  React.useEffect(() => {
-    if (open) {
-      const data: Record<string, unknown> = {};
+  function initialFormData(): Record<string, unknown> {
+    const data: Record<string, unknown> = {};
 
-      for (const col of columns) {
-        // For add mode, skip auto-generated fields
-        if (mode === "add" && (col.isPrimaryKey || col.name === "id")) {
-          continue;
-        }
-        if (mode === "add" && (col.name === "created_at" || col.name === "updated_at")) {
-          continue;
-        }
-
-        // Get initial value from row (for edit or duplicate)
-        const rowValue = row?.[col.name];
-
-        if (mode === "edit" && (col.name === "id" || col.isPrimaryKey)) {
-          data[col.name] = rowValue;
-        } else if (col.type === "timestamp" && rowValue) {
-          // Format timestamp for datetime-local input
-          const date = new Date(rowValue as number);
-          data[col.name] = date.toISOString().slice(0, 16);
-        } else if (col.type === "json" && rowValue) {
-          data[col.name] = typeof rowValue === "string"
-            ? rowValue
-            : JSON.stringify(rowValue, null, 2);
-        } else if (col.type === "boolean") {
-          data[col.name] = rowValue === 1 || rowValue === true;
-        } else if (rowValue !== undefined && rowValue !== null) {
-          data[col.name] = rowValue;
-        } else if (col.type === "boolean") {
-          data[col.name] = false;
-        } else {
-          data[col.name] = "";
-        }
+    for (const col of columns) {
+      // For add mode, skip auto-generated fields
+      if (mode === "add" && (col.isPrimaryKey || col.name === "id")) {
+        continue;
+      }
+      if (mode === "add" && (col.name === "created_at" || col.name === "updated_at")) {
+        continue;
       }
 
-      setFormData(data);
-      setErrors({});
+      // Get initial value from row (for edit or duplicate)
+      const rowValue = row?.[col.name];
+
+      if (mode === "edit" && (col.name === "id" || col.isPrimaryKey)) {
+        data[col.name] = rowValue;
+      } else if (col.type === "timestamp" && rowValue) {
+        // Format timestamp for datetime-local input
+        const date = new Date(rowValue as number);
+        data[col.name] = date.toISOString().slice(0, 16);
+      } else if (col.type === "json" && rowValue) {
+        data[col.name] = typeof rowValue === "string"
+          ? rowValue
+          : JSON.stringify(rowValue, null, 2);
+      } else if (col.type === "boolean") {
+        data[col.name] = rowValue === 1 || rowValue === true;
+      } else if (rowValue !== undefined && rowValue !== null) {
+        data[col.name] = rowValue;
+      } else if (col.type === "boolean") {
+        data[col.name] = false;
+      } else {
+        data[col.name] = "";
+      }
     }
-  }, [open, columns, row, mode]);
+    return data;
+  }
+
+  // A fresh form each time the dialog opens, or opens on another row.
+  const [openedFor, setOpenedFor] = React.useState<{
+    row: typeof row;
+    mode: typeof mode;
+    columns: typeof columns;
+  } | null>(null);
+  if (open && (openedFor?.row !== row || openedFor?.mode !== mode || openedFor?.columns !== columns)) {
+    setOpenedFor({ row, mode, columns });
+    setFormData(initialFormData());
+    setErrors({});
+  } else if (!open && openedFor) {
+    setOpenedFor(null);
+  }
+
 
   const handleChange = (column: string, value: unknown) => {
     setFormData((prev) => ({ ...prev, [column]: value }));

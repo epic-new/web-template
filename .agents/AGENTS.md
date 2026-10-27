@@ -2,6 +2,12 @@
 
 This file provides guidance to coding agents (Claude Code, Codex, OpenCode) working with this repository. `.claude/CLAUDE.md` and `.codex/AGENTS.md` are symlinks to this file.
 
+## This is not the Next.js you know
+
+The installed Next.js may differ from your training data — APIs, conventions
+and file structure. Read the relevant guide in `node_modules/next/dist/docs/`
+before writing Next.js code, and heed deprecation notices.
+
 ## Architecture
 
 **Four-layer architecture** with adjacent, one-way dependencies:

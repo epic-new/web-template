@@ -1,0 +1,3 @@
+[install]
+# A template installs exactly what it names: `bun add` writes the version, not a range.
+exact = true

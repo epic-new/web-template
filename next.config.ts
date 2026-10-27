@@ -7,6 +7,10 @@ const nextConfig: NextConfig = {
   // instances in the same project don't collide on `.next`.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   devIndicators: false,
+  // `next dev` would otherwise write a root AGENTS.md in every project it
+  // starts; this template's agent instructions live in .agents/AGENTS.md,
+  // which carries the same note about Next's bundled docs.
+  agentRules: false,
   // The hosts a preview of this app is served from are the environment's to
   // name, not this file's: Epic sets EPIC_DEV_ORIGINS on the machines it runs,
   // so a new preview domain never needs a change here. Its proxy already
