@@ -1,5 +1,7 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
+
 import {
   anonymousPurposes,
   clearVisitorCookie,
@@ -93,15 +95,26 @@ export async function relayToEpic(request: Request, path: string[], cookies: Coo
  */
 async function identity(request: Request, cookies: Cookies): Promise<Response> {
   const anonymous = anonymousPurposes();
-  if (request.method === "DELETE") return json({ contractVersion: 1, kind: null, anonymous }, { "set-cookie": clearVisitorCookie() });
+  if (request.method === "DELETE") {
+    return json({ contractVersion: 1, kind: null, anonymous, ref: null }, { "set-cookie": clearVisitorCookie() });
+  }
   if (request.method !== "POST") return failure("not_found", 404);
 
-  const subject = await resolveSubject(cookies);
-  if (subject) return json({ contractVersion: 1, kind: subject.kind, anonymous });
-
   const secret = identitySecret();
-  if (anonymous.length === 0 || !secret) return json({ contractVersion: 1, kind: null, anonymous });
-  return json({ contractVersion: 1, kind: "visitor", anonymous }, { "set-cookie": mintVisitorCookie(secret) });
+  const subject = await resolveSubject(cookies);
+  if (subject && secret) return json({ contractVersion: 1, kind: subject.kind, anonymous, ref: refOf(pseudonymOf(subject, secret)) });
+
+  if (anonymous.length === 0 || !secret) return json({ contractVersion: 1, kind: null, anonymous, ref: null });
+  const minted = mintVisitorCookie(secret);
+  return json(
+    { contractVersion: 1, kind: "visitor", anonymous, ref: refOf(pseudonymOf({ kind: "visitor", id: minted.visitorId }, secret)) },
+    { "set-cookie": minted.cookie },
+  );
+}
+
+/** Changes when the person does, so the page never carries one person's recording on into the next; says nothing about who. */
+function refOf(pseudonym: string): string {
+  return createHash("sha256").update(pseudonym).digest("base64url").slice(0, 16);
 }
 
 function isSameOrigin(request: Request): boolean {

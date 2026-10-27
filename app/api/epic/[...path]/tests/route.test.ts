@@ -133,7 +133,7 @@ describe("/api/epic/[...path]", () => {
 
       const response = await call("POST", "identity", { body: "{}" });
 
-      expect(await response.json()).toEqual({ contractVersion: 1, kind: "user", anonymous: [] });
+      expect(await response.json()).toEqual({ contractVersion: 1, kind: "user", anonymous: [], ref: expect.stringMatching(/^[A-Za-z0-9_-]{16}$/) });
       expect(response.headers.get("set-cookie")).toBeNull();
       expect(received).toHaveLength(0);
     });
@@ -143,7 +143,7 @@ describe("/api/epic/[...path]", () => {
 
       vi.stubEnv("EPIC_REPLAY_ANONYMOUS_REPORTING", "allow");
       const minted = await call("POST", "identity", { body: "{}" });
-      expect(await minted.json()).toEqual({ contractVersion: 1, kind: "visitor", anonymous: ["report"] });
+      expect(await minted.json()).toMatchObject({ contractVersion: 1, kind: "visitor", anonymous: ["report"] });
       const cookie = minted.headers.get("set-cookie")!;
       expect(cookie).toMatch(/^epic_replay_visitor=[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]+; Path=\/api\/epic;/);
 
@@ -158,6 +158,16 @@ describe("/api/epic/[...path]", () => {
       await call("POST", "telemetry", { body: "{}", headers: { cookie: `epic_replay_visitor=${"a".repeat(43)}.forged` } });
 
       expect(received[0]!.headers["x-epic-subject"]).toBeUndefined();
+    });
+
+    it("tells two people apart without naming either", async () => {
+      session.user = { id: "user-1" };
+      const first = (await (await call("POST", "identity", { body: "{}" })).json()).ref;
+      session.user = { id: "user-2" };
+      const second = (await (await call("POST", "identity", { body: "{}" })).json()).ref;
+
+      expect(first).not.toBe(second);
+      expect(`${first}${second}`).not.toContain("user-");
     });
 
     it("forgets the visitor on DELETE", async () => {

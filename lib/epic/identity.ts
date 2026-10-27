@@ -56,9 +56,12 @@ export function pseudonymOf(subject: EpicSubject, secret: string): string {
   return `sub_${createHmac("sha256", secret).update(`${SUBJECT_DOMAIN}:${kind}:${subject.id}`).digest("base64url")}`;
 }
 
-export function mintVisitorCookie(secret: string): string {
+export function mintVisitorCookie(secret: string): { visitorId: string; cookie: string } {
   const visitorId = randomBytes(32).toString("base64url");
-  return `${VISITOR_COOKIE}=${visitorId}.${sign(visitorId, secret)}; ${cookieAttributes(VISITOR_MAX_AGE_SECONDS)}`;
+  return {
+    visitorId,
+    cookie: `${VISITOR_COOKIE}=${visitorId}.${sign(visitorId, secret)}; ${cookieAttributes(VISITOR_MAX_AGE_SECONDS)}`,
+  };
 }
 
 export function clearVisitorCookie(): string {
