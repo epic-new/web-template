@@ -293,15 +293,15 @@ export default function CalendarPage() {
             code={`<Calendar
   mode="single"
   captionLayout="dropdown"
-  fromYear={2020}
-  toYear={2030}
+  startMonth={new Date(2020, 0)}
+  endMonth={new Date(2030, 11)}
 />`}
           >
             <Calendar
               mode="single"
               captionLayout="dropdown"
-              fromYear={2020}
-              toYear={2030}
+              startMonth={new Date(2020, 0)}
+              endMonth={new Date(2030, 11)}
             />
           </ComponentPreview>
 
@@ -375,8 +375,8 @@ export default function CalendarPage() {
                   captionLayout=&quot;dropdown&quot;
                 </code>{' '}
                 for month/year dropdowns (requires{' '}
-                <code className="rounded bg-muted px-1">fromYear</code> and{' '}
-                <code className="rounded bg-muted px-1">toYear</code>)
+                <code className="rounded bg-muted px-1">startMonth</code> and{' '}
+                <code className="rounded bg-muted px-1">endMonth</code>)
               </li>
               <li>
                 Use <code className="rounded bg-muted px-1">disabled</code> prop

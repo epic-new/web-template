@@ -2,6 +2,12 @@
 
 This file provides guidance to coding agents (Claude Code, Codex, OpenCode) working with this repository. `.claude/CLAUDE.md` and `.codex/AGENTS.md` are symlinks to this file.
 
+## This is not the Next.js you know
+
+The installed Next.js may differ from your training data — APIs, conventions
+and file structure. Read the relevant guide in `node_modules/next/dist/docs/`
+before writing Next.js code, and heed deprecation notices.
+
 ## Architecture
 
 **Four-layer architecture** with adjacent, one-way dependencies:
@@ -174,7 +180,6 @@ Epic pins, for this project's type, so a new release reaches the next build
 without anyone updating anything. The `epic` CLI loads them as a plugin
 (`epic:plan`, `epic:execute`, …), and a cloud build writes them into the
 sandbox. Nothing is installed into the repo, and `git status` stays clean.
-`.epic/skills.lock.json` is only read when Epic cannot be reached.
 
 - **prd → build** is the project workflow: write a PRD, break it into issues,
   then build each issue (plan, then execute, then verify).

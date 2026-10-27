@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { render, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PreviewToolbarLoader } from './preview-toolbar-loader';
 
-const HOST = 'https://epic.new';
+const HOST = 'https://build.epic.new';
 
 /**
  * jsdom runs every test in one window, so "inside an iframe" has to be staged —
@@ -27,9 +27,11 @@ const loaded = () =>
 
 beforeEach(() => {
   document.head.innerHTML = '';
+  vi.stubEnv('NEXT_PUBLIC_PREVIEW_HOST_ORIGIN', HOST);
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   Object.defineProperty(window, 'parent', { value: window, configurable: true });
   Object.defineProperty(window.location, 'ancestorOrigins', {
     value: [] as unknown as DOMStringList,

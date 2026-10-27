@@ -4,6 +4,7 @@ import { Providers } from "@/components/providers";
 import { Toaster } from "@/components/ui/sonner";
 import { PreviewBridge } from "@/components/preview-bridge";
 import { PreviewToolbarLoader } from "@/components/preview-toolbar-loader";
+import { EpicRuntime } from "@/components/epic-runtime";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -48,6 +49,9 @@ export default function RootLayout({
               address bar and breaks screen switching — see
               docs/references/preview-bridge.md in the prototype template. */}
           <PreviewBridge />
+          {/* Session replay and the bug-report button, served by Epic; see
+              components/epic-runtime.tsx. */}
+          <EpicRuntime />
           {/* Pulls the annotation toolbar from the workspace that framed this
               preview. Unlike the bridge above, this one is safe to delete: the
               app works without it, and the toolbar it loads is served by

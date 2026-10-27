@@ -93,38 +93,23 @@ type HostMessage =
 /**
  * Which parent origins this preview will talk to.
  *
- * `NEXT_PUBLIC_PREVIEW_HOST_ORIGIN` pins it to one origin, which is what a
- * deployment should do. The defaults cover Epic's hosts and local development,
- * so a fresh checkout works with no configuration — and so the workspace can
- * move between subdomains (it runs at `build.epic.new` today) without this
- * template changing.
+ * The ones `NEXT_PUBLIC_PREVIEW_HOST_ORIGIN` names, comma-separated: Epic sets
+ * it to its workspace on the machines it runs, so the workspace can move to
+ * another host without this file changing in every project already created.
+ * Unset, only a local workspace is trusted, so a fresh checkout still works
+ * and a deployed app framed by a stranger stays silent.
  */
 export function isAllowedHost(origin: string): boolean {
-  const configured = process.env.NEXT_PUBLIC_PREVIEW_HOST_ORIGIN;
-  if (configured) return origin === configured;
+  const configured = (process.env.NEXT_PUBLIC_PREVIEW_HOST_ORIGIN ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (configured.length > 0) return configured.includes(origin);
 
   try {
     const { protocol, hostname } = new URL(origin);
     if (protocol !== 'https:' && protocol !== 'http:') return false;
-
-    // A preview is never a workspace, even though it shares the domain.
-    //
-    // Sandboxes are served at `{port}-{sandboxId}.proxy.epic.new`, which ends
-    // in `.epic.new` and so passes the test below. That let one prototype frame
-    // another and be trusted as its host. The port prefix is the tell, and it is
-    // one no workspace host has. The proxy's own gate is the other lock — without
-    // a token the frame does not load at all — but a list that ships frozen in a
-    // Docker image is the wrong place to depend on something else being careful.
-    if (/^\d+-/.test(hostname)) return false;
-
-    return (
-      hostname === 'localhost' ||
-      hostname === '127.0.0.1' ||
-      hostname === 'epic.new' ||
-      hostname.endsWith('.epic.new') ||
-      hostname === 'lvh.me' ||
-      hostname.endsWith('.lvh.me')
-    );
+    return hostname === 'localhost' || hostname === '127.0.0.1';
   } catch {
     return false;
   }

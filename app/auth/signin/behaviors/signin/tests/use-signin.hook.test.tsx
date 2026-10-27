@@ -41,10 +41,14 @@ describe("signin behavior scenarios", () => {
 
     act(() => result.current.formAction(form));
 
+    // The mutation starts after this call returns, so wait for its outcome,
+    // not for a loading flag that is already false before it begins.
+    await waitFor(async () => {
+      await PostDB(db, schema, {
+        session: [{ userId }],
+      });
+    });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.state.error).toBeNull();
-    await PostDB(db, schema, {
-      session: [{ userId }],
-    });
   });
 });

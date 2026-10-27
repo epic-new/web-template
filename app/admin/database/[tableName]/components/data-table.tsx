@@ -1,13 +1,7 @@
 "use client";
 
 import * as React from "react";
-import {
-  type ColumnDef,
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-  type VisibilityState,
-} from "@tanstack/react-table";
+import { useTable, type ColumnVisibilityState } from "@tanstack/react-table";
 import {
   Table,
   TableBody,
@@ -19,9 +13,10 @@ import {
 import type { TableRow as DataRow } from "../state";
 import { CellEditor } from "./cell-editor";
 import type { ColumnMetadata } from "../state";
+import { dataTableFeatures, type DataTableColumn } from "../table-features";
 
 interface DataTableProps {
-  columns: ColumnDef<DataRow>[];
+  columns: DataTableColumn[];
   data: DataRow[];
   columnMetadata: ColumnMetadata[];
   onCellEdit?: (
@@ -46,19 +41,19 @@ export function DataTable({
     column: string;
   } | null>(null);
 
-  const table = useReactTable({
+  const table = useTable({
+    features: dataTableFeatures,
     data,
     columns,
-    getCoreRowModel: getCoreRowModel(),
     onColumnVisibilityChange: (updater) => {
       const newValue =
         typeof updater === "function"
-          ? updater(columnVisibility as VisibilityState)
+          ? updater(columnVisibility as ColumnVisibilityState)
           : updater;
       onColumnVisibilityChange(newValue as Record<string, boolean>);
     },
     state: {
-      columnVisibility: columnVisibility as VisibilityState,
+      columnVisibility: columnVisibility as ColumnVisibilityState,
     },
   });
 
@@ -103,12 +98,7 @@ export function DataTable({
                   key={header.id}
                   className={`h-10 px-4 text-muted-foreground ${index !== headerGroup.headers.length - 1 ? "border-r border-border/50" : ""}`}
                 >
-                  {header.isPlaceholder
-                    ? null
-                    : flexRender(
-                        header.column.columnDef.header,
-                        header.getContext()
-                      )}
+                  {header.isPlaceholder ? null : <table.FlexRender header={header} />}
                 </TableHead>
               ))}
             </TableRow>
@@ -119,7 +109,6 @@ export function DataTable({
             table.getRowModel().rows.map((row) => (
               <TableRow
                 key={row.id}
-                data-state={row.getIsSelected() && "selected"}
                 className={`${row.original._pending ? "opacity-50" : ""} hover:bg-muted/30`}
               >
                 {row.getVisibleCells().map((cell, index) => {
@@ -135,10 +124,7 @@ export function DataTable({
                   if (columnId === "actions") {
                     return (
                       <TableCell key={cell.id} className="h-10 px-4 w-[60px]">
-                        {flexRender(
-                          cell.column.columnDef.cell,
-                          cell.getContext()
-                        )}
+                        <table.FlexRender cell={cell} />
                       </TableCell>
                     );
                   }
@@ -160,10 +146,7 @@ export function DataTable({
                         />
                       ) : (
                         <span className="block truncate text-sm">
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext()
-                          )}
+                          <table.FlexRender cell={cell} />
                         </span>
                       )}
                     </TableCell>

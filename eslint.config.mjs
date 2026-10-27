@@ -596,6 +596,8 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // The verify server's own build directory (NEXT_DIST_DIR).
+    ".next-verify/**",
     ".worktrees/**",
     "out/**",
     "build/**",
