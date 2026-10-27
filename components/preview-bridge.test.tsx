@@ -12,7 +12,7 @@ vi.mock('next/navigation', () => ({
 
 import { PreviewBridge } from './preview-bridge';
 
-const HOST = 'https://epic.new';
+const HOST = 'https://build.epic.new';
 
 type Posted = { message: Record<string, unknown>; targetOrigin: string };
 let posted: Posted[] = [];
@@ -70,9 +70,11 @@ describe('PreviewBridge', () => {
     push.mockClear();
     pathname = '/';
     window.history.replaceState({}, '', '/');
+    vi.stubEnv('NEXT_PUBLIC_PREVIEW_HOST_ORIGIN', HOST);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     Object.defineProperty(window, 'parent', { value: window, configurable: true });
   });
 
@@ -102,11 +104,10 @@ describe('PreviewBridge', () => {
 
     it.each([
       ['a sandbox on the preview proxy', 'https://8080-abc123.proxy.epic.new'],
-      ['a sandbox in local development', 'http://8080-abc123.lvh.me:1234'],
+      ['another host on the same domain', 'https://epic.new'],
     ])('stays silent inside a frame hosted by %s', async (_label, origin) => {
-      // A preview is never a workspace, even though it shares the domain. One
-      // prototype framing another used to pass the allowlist on the strength of
-      // the `.epic.new` suffix alone.
+      // Only the origins the environment names: one prototype framing another
+      // used to pass on the strength of a shared `.epic.new` suffix.
       frameInsideHost(origin);
 
       render(<PreviewBridge />);
@@ -115,17 +116,32 @@ describe('PreviewBridge', () => {
       expect(posted).toEqual([]);
     });
 
-    it.each([
-      ['the production workspace', 'https://build.epic.new'],
-      ['the apex domain', 'https://epic.new'],
-      ['a local workspace', 'http://localhost:3000'],
-    ])('talks to %s', async (_label, origin) => {
-      frameInsideHost(origin);
+    it('talks to any of the hosts the environment names', async () => {
+      vi.stubEnv('NEXT_PUBLIC_PREVIEW_HOST_ORIGIN', `https://staging.epic.new, ${HOST}`);
+      frameInsideHost(HOST);
 
       render(<PreviewBridge />);
 
       await waitFor(() => expect(posted).toHaveLength(1));
-      expect(posted[0]?.targetOrigin).toBe(origin);
+      expect(posted[0]?.targetOrigin).toBe(HOST);
+    });
+
+    it.each([
+      ['a local workspace', 'http://localhost:3000', true],
+      ['a hosted workspace', 'https://build.epic.new', false],
+    ])('with no host named, talks to %s: %s', async (_label, origin, talks) => {
+      vi.stubEnv('NEXT_PUBLIC_PREVIEW_HOST_ORIGIN', '');
+      frameInsideHost(origin);
+
+      render(<PreviewBridge />);
+
+      if (talks) {
+        await waitFor(() => expect(posted).toHaveLength(1));
+        expect(posted[0]?.targetOrigin).toBe(origin);
+      } else {
+        await settle();
+        expect(posted).toEqual([]);
+      }
     });
 
     it('stays silent inside a frame whose parent origin is not recognised', async () => {
