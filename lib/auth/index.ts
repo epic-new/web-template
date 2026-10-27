@@ -12,21 +12,9 @@ import {
   betterAuthCookieNames,
   readBetterAuthCookie,
 } from "./provider-cookies";
+import { envList } from "@/lib/env-list";
 
 const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:8080";
-
-function getParentDomain(url: string): string {
-  try {
-    const { hostname } = new URL(url);
-    if (hostname === "localhost" || hostname === "127.0.0.1") return "";
-    const parts = hostname.split(".");
-    return parts.length > 2 ? parts.slice(-2).join(".") : "";
-  } catch {
-    return "";
-  }
-}
-
-const parentDomain = getParentDomain(baseUrl);
 
 // The iframe preview is served cross-site over the HTTPS proxy domain, which
 // requires Secure + SameSite=None + Partitioned cookies. But the verify phase
@@ -59,31 +47,20 @@ export const auth = betterAuth({
   user: {
     additionalFields: {},
   },
+  // Where this app is served from is always trusted. Any other origin — the
+  // host that frames a preview, for instance — is the environment's to name:
+  // Epic sets BETTER_AUTH_TRUSTED_ORIGINS on the machines it runs, so its
+  // domains are never frozen into the code. Passed here explicitly because
+  // Better Auth reads the variable on init but drops it on the request path.
   trustedOrigins: [
-    // This app's own origin, verbatim. The wildcard below is derived from the
-    // PARENT domain (the last two labels), and one `*` matches one label — so
-    // for a preview served at `https://8080-<sandbox>.proxy.epic.new` the
-    // pattern `https://*.epic.new` does not match, and Better Auth answers
-    // 403 to its own sign-in form. Listing baseUrl removes the guesswork:
-    // whatever host this app believes it is served from is trusted.
     baseUrl,
-    ...(parentDomain
-      ? [`https://${parentDomain}`, `https://*.${parentDomain}`]
-      : []),
+    ...envList("BETTER_AUTH_TRUSTED_ORIGINS"),
     "http://localhost:3000",
   ],
   trustedProxyHeaders: true,
   advanced: {
     cookiePrefix: BETTER_AUTH_COOKIE_PREFIX,
     useSecureCookies: isSecureContext,
-    ...(isSecureContext && parentDomain
-      ? {
-          crossSubDomainCookies: {
-            enabled: true,
-            domain: parentDomain,
-          },
-        }
-      : {}),
     defaultCookieAttributes: isSecureContext
       ? {
           sameSite: "none",
