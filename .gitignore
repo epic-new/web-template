@@ -88,3 +88,5 @@ next-env.d.ts
 # by GitHub's size limit.
 .harness-bootstrap
 .agent-runs
+
+__pycache__/

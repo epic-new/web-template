@@ -174,7 +174,6 @@ Epic pins, for this project's type, so a new release reaches the next build
 without anyone updating anything. The `epic` CLI loads them as a plugin
 (`epic:plan`, `epic:execute`, …), and a cloud build writes them into the
 sandbox. Nothing is installed into the repo, and `git status` stays clean.
-`.epic/skills.lock.json` is only read when Epic cannot be reached.
 
 - **prd → build** is the project workflow: write a PRD, break it into issues,
   then build each issue (plan, then execute, then verify).
