@@ -107,11 +107,4 @@ export const styleguideNavigation: NavItem[] = [
       { title: 'Sheet', href: '/styleguide/components/sheet', description: 'Full-width slide-out panel' },
     ],
   },
-  {
-    title: 'Development',
-    href: '/styleguide/replay',
-    items: [
-      { title: 'Replay Privacy', href: '/styleguide/replay', description: 'Development harness for replay consent, masking and route exclusion' },
-    ],
-  },
 ]

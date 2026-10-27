@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, primaryKey } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 
 export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
@@ -70,20 +70,3 @@ export const verification = sqliteTable("verification", {
 
 export type InsertVerification = typeof verification.$inferInsert;
 export type SelectVerification = typeof verification.$inferSelect;
-
-export const REPLAY_RATE_BUCKETS = ["report", "identity"] as const;
-export type ReplayRateBucket = (typeof REPLAY_RATE_BUCKETS)[number];
-
-/** Fixed-window counters per subject and bucket, shared by every server process. */
-export const replayRateLimit = sqliteTable(
-  "replay_rate_limit",
-  {
-    subjectId: text("subject_id").notNull(),
-    bucket: text("bucket", { enum: REPLAY_RATE_BUCKETS }).notNull(),
-    windowStartedAt: integer("window_started_at").notNull(),
-    count: integer("count").notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.subjectId, table.bucket] })],
-);
-
-export type SelectReplayRateLimit = typeof replayRateLimit.$inferSelect;
