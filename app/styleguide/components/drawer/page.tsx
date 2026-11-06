@@ -108,9 +108,7 @@ function GoalDrawerExample() {
 
   return (
     <Drawer>
-      <DrawerTrigger asChild>
-        <Button variant="outline">Set Goal</Button>
-      </DrawerTrigger>
+      <DrawerTrigger render={<Button variant="outline" />}>Set Goal</DrawerTrigger>
       <DrawerContent>
         <div className="mx-auto w-full max-w-sm">
           <DrawerHeader>
@@ -151,9 +149,7 @@ function GoalDrawerExample() {
           </div>
           <DrawerFooter>
             <Button>Submit</Button>
-            <DrawerClose asChild>
-              <Button variant="outline">Cancel</Button>
-            </DrawerClose>
+            <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
           </DrawerFooter>
         </div>
       </DrawerContent>
@@ -177,7 +173,7 @@ export default function DrawerPage() {
       <Section id="overview" title="What it is">
         <div className="prose prose-gray dark:prose-invert max-w-none">
           <p className="text-muted-foreground">
-            The Drawer component is built on top of Vaul and provides a swipe-dismissable
+            The Drawer component is built on top of Base UI and provides a swipe-dismissable
             panel that slides from any edge of the screen. It is optimized for touch
             interactions and mobile interfaces.
           </p>
@@ -202,7 +198,7 @@ export default function DrawerPage() {
           <div className="rounded-lg border border-border p-4">
             <h4 className="font-medium text-foreground">Drawer</h4>
             <p className="mt-1 text-sm text-muted-foreground">
-              Root container that manages open/closed state and direction.
+              Root container that manages open/closed state and swipe direction.
             </p>
           </div>
           <div className="rounded-lg border border-border p-4">
@@ -214,7 +210,7 @@ export default function DrawerPage() {
           <div className="rounded-lg border border-border p-4">
             <h4 className="font-medium text-foreground">DrawerContent</h4>
             <p className="mt-1 text-sm text-muted-foreground">
-              Main content container. Includes overlay and drag handle for bottom direction.
+              Main content container. Includes the overlay, plus a drag handle when showSwipeHandle is set.
             </p>
           </div>
           <div className="rounded-lg border border-border p-4">
@@ -283,10 +279,8 @@ export default function DrawerPage() {
         <div className="space-y-8">
           <ComponentPreview
             title="Bottom (Default)"
-            code={`<Drawer>
-  <DrawerTrigger asChild>
-    <Button variant="outline">Bottom Drawer</Button>
-  </DrawerTrigger>
+            code={`<Drawer showSwipeHandle>
+  <DrawerTrigger render={<Button variant="outline" />}>Bottom Drawer</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Bottom Drawer</DrawerTitle>
@@ -297,10 +291,8 @@ export default function DrawerPage() {
   </DrawerContent>
 </Drawer>`}
           >
-            <Drawer>
-              <DrawerTrigger asChild>
-                <Button variant="outline">Bottom Drawer</Button>
-              </DrawerTrigger>
+            <Drawer showSwipeHandle>
+              <DrawerTrigger render={<Button variant="outline" />}>Bottom Drawer</DrawerTrigger>
               <DrawerContent>
                 <DrawerHeader>
                   <DrawerTitle>Bottom Drawer</DrawerTitle>
@@ -309,9 +301,7 @@ export default function DrawerPage() {
                   </DrawerDescription>
                 </DrawerHeader>
                 <DrawerFooter>
-                  <DrawerClose asChild>
-                    <Button variant="outline">Close</Button>
-                  </DrawerClose>
+                  <DrawerClose render={<Button variant="outline" />}>Close</DrawerClose>
                 </DrawerFooter>
               </DrawerContent>
             </Drawer>
@@ -319,10 +309,8 @@ export default function DrawerPage() {
 
           <ComponentPreview
             title="Top"
-            code={`<Drawer direction="top">
-  <DrawerTrigger asChild>
-    <Button variant="outline">Top Drawer</Button>
-  </DrawerTrigger>
+            code={`<Drawer swipeDirection="up">
+  <DrawerTrigger render={<Button variant="outline" />}>Top Drawer</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Top Drawer</DrawerTitle>
@@ -333,10 +321,8 @@ export default function DrawerPage() {
   </DrawerContent>
 </Drawer>`}
           >
-            <Drawer direction="top">
-              <DrawerTrigger asChild>
-                <Button variant="outline">Top Drawer</Button>
-              </DrawerTrigger>
+            <Drawer swipeDirection="up">
+              <DrawerTrigger render={<Button variant="outline" />}>Top Drawer</DrawerTrigger>
               <DrawerContent>
                 <DrawerHeader>
                   <DrawerTitle>Top Drawer</DrawerTitle>
@@ -345,9 +331,7 @@ export default function DrawerPage() {
                   </DrawerDescription>
                 </DrawerHeader>
                 <DrawerFooter>
-                  <DrawerClose asChild>
-                    <Button variant="outline">Close</Button>
-                  </DrawerClose>
+                  <DrawerClose render={<Button variant="outline" />}>Close</DrawerClose>
                 </DrawerFooter>
               </DrawerContent>
             </Drawer>
@@ -355,10 +339,8 @@ export default function DrawerPage() {
 
           <ComponentPreview
             title="Left"
-            code={`<Drawer direction="left">
-  <DrawerTrigger asChild>
-    <Button variant="outline">Left Drawer</Button>
-  </DrawerTrigger>
+            code={`<Drawer swipeDirection="left">
+  <DrawerTrigger render={<Button variant="outline" />}>Left Drawer</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Left Drawer</DrawerTitle>
@@ -369,10 +351,8 @@ export default function DrawerPage() {
   </DrawerContent>
 </Drawer>`}
           >
-            <Drawer direction="left">
-              <DrawerTrigger asChild>
-                <Button variant="outline">Left Drawer</Button>
-              </DrawerTrigger>
+            <Drawer swipeDirection="left">
+              <DrawerTrigger render={<Button variant="outline" />}>Left Drawer</DrawerTrigger>
               <DrawerContent>
                 <DrawerHeader>
                   <DrawerTitle>Left Drawer</DrawerTitle>
@@ -381,9 +361,7 @@ export default function DrawerPage() {
                   </DrawerDescription>
                 </DrawerHeader>
                 <DrawerFooter>
-                  <DrawerClose asChild>
-                    <Button variant="outline">Close</Button>
-                  </DrawerClose>
+                  <DrawerClose render={<Button variant="outline" />}>Close</DrawerClose>
                 </DrawerFooter>
               </DrawerContent>
             </Drawer>
@@ -391,10 +369,8 @@ export default function DrawerPage() {
 
           <ComponentPreview
             title="Right"
-            code={`<Drawer direction="right">
-  <DrawerTrigger asChild>
-    <Button variant="outline">Right Drawer</Button>
-  </DrawerTrigger>
+            code={`<Drawer swipeDirection="right">
+  <DrawerTrigger render={<Button variant="outline" />}>Right Drawer</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Right Drawer</DrawerTitle>
@@ -405,10 +381,8 @@ export default function DrawerPage() {
   </DrawerContent>
 </Drawer>`}
           >
-            <Drawer direction="right">
-              <DrawerTrigger asChild>
-                <Button variant="outline">Right Drawer</Button>
-              </DrawerTrigger>
+            <Drawer swipeDirection="right">
+              <DrawerTrigger render={<Button variant="outline" />}>Right Drawer</DrawerTrigger>
               <DrawerContent>
                 <DrawerHeader>
                   <DrawerTitle>Right Drawer</DrawerTitle>
@@ -417,9 +391,7 @@ export default function DrawerPage() {
                   </DrawerDescription>
                 </DrawerHeader>
                 <DrawerFooter>
-                  <DrawerClose asChild>
-                    <Button variant="outline">Close</Button>
-                  </DrawerClose>
+                  <DrawerClose render={<Button variant="outline" />}>Close</DrawerClose>
                 </DrawerFooter>
               </DrawerContent>
             </Drawer>
@@ -435,10 +407,16 @@ export default function DrawerPage() {
             <PropsTable
               props={[
                 {
-                  name: 'direction',
-                  type: '"top" | "right" | "bottom" | "left"',
-                  default: '"bottom"',
-                  description: 'The edge from which the drawer slides.',
+                  name: 'swipeDirection',
+                  type: '"up" | "right" | "down" | "left"',
+                  default: '"down"',
+                  description: 'The direction that dismisses the drawer. It sits on that edge of the screen.',
+                },
+                {
+                  name: 'showSwipeHandle',
+                  type: 'boolean',
+                  default: 'false',
+                  description: 'Whether to show the drag handle.',
                 },
                 {
                   name: 'open',
@@ -451,16 +429,9 @@ export default function DrawerPage() {
                   description: 'Callback when open state changes.',
                 },
                 {
-                  name: 'shouldScaleBackground',
-                  type: 'boolean',
-                  default: 'true',
-                  description: 'Whether to scale the background when open.',
-                },
-                {
-                  name: 'dismissible',
-                  type: 'boolean',
-                  default: 'true',
-                  description: 'Whether the drawer can be dismissed by clicking outside or swiping.',
+                  name: 'snapPoints',
+                  type: 'DrawerSnapPoint[]',
+                  description: 'Heights the drawer can rest at.',
                 },
               ]}
             />
@@ -470,10 +441,9 @@ export default function DrawerPage() {
             <PropsTable
               props={[
                 {
-                  name: 'asChild',
-                  type: 'boolean',
-                  default: 'false',
-                  description: 'Merge props onto child element instead of rendering a button.',
+                  name: 'render',
+                  type: 'ReactElement',
+                  description: 'Element to render instead of the default button.',
                 },
               ]}
             />
@@ -499,9 +469,7 @@ export default function DrawerPage() {
           <ComponentPreview
             title="Basic Drawer"
             code={`<Drawer>
-  <DrawerTrigger asChild>
-    <Button>Open Drawer</Button>
-  </DrawerTrigger>
+  <DrawerTrigger render={<Button />}>Open Drawer</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Drawer Title</DrawerTitle>
@@ -511,17 +479,13 @@ export default function DrawerPage() {
     </DrawerHeader>
     <DrawerFooter>
       <Button>Submit</Button>
-      <DrawerClose asChild>
-        <Button variant="outline">Cancel</Button>
-      </DrawerClose>
+      <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
     </DrawerFooter>
   </DrawerContent>
 </Drawer>`}
           >
             <Drawer>
-              <DrawerTrigger asChild>
-                <Button>Open Drawer</Button>
-              </DrawerTrigger>
+              <DrawerTrigger render={<Button />}>Open Drawer</DrawerTrigger>
               <DrawerContent>
                 <DrawerHeader>
                   <DrawerTitle>Drawer Title</DrawerTitle>
@@ -531,9 +495,7 @@ export default function DrawerPage() {
                 </DrawerHeader>
                 <DrawerFooter>
                   <Button>Submit</Button>
-                  <DrawerClose asChild>
-                    <Button variant="outline">Cancel</Button>
-                  </DrawerClose>
+                  <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
                 </DrawerFooter>
               </DrawerContent>
             </Drawer>
@@ -542,9 +504,7 @@ export default function DrawerPage() {
           <ComponentPreview
             title="With Form"
             code={`<Drawer>
-  <DrawerTrigger asChild>
-    <Button>Edit Profile</Button>
-  </DrawerTrigger>
+  <DrawerTrigger render={<Button />}>Edit Profile</DrawerTrigger>
   <DrawerContent>
     <div className="mx-auto w-full max-w-sm">
       <DrawerHeader>
@@ -565,18 +525,14 @@ export default function DrawerPage() {
       </div>
       <DrawerFooter>
         <Button>Save</Button>
-        <DrawerClose asChild>
-          <Button variant="outline">Cancel</Button>
-        </DrawerClose>
+        <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
       </DrawerFooter>
     </div>
   </DrawerContent>
 </Drawer>`}
           >
             <Drawer>
-              <DrawerTrigger asChild>
-                <Button>Edit Profile</Button>
-              </DrawerTrigger>
+              <DrawerTrigger render={<Button />}>Edit Profile</DrawerTrigger>
               <DrawerContent>
                 <div className="mx-auto w-full max-w-sm">
                   <DrawerHeader>
@@ -597,9 +553,7 @@ export default function DrawerPage() {
                   </div>
                   <DrawerFooter>
                     <Button>Save</Button>
-                    <DrawerClose asChild>
-                      <Button variant="outline">Cancel</Button>
-                    </DrawerClose>
+                    <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
                   </DrawerFooter>
                 </div>
               </DrawerContent>
@@ -611,9 +565,7 @@ export default function DrawerPage() {
             code={`const [goal, setGoal] = useState(350)
 
 <Drawer>
-  <DrawerTrigger asChild>
-    <Button variant="outline">Set Goal</Button>
-  </DrawerTrigger>
+  <DrawerTrigger render={<Button variant="outline" />}>Set Goal</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Move Goal</DrawerTitle>
@@ -630,9 +582,7 @@ export default function DrawerPage() {
     </div>
     <DrawerFooter>
       <Button>Submit</Button>
-      <DrawerClose asChild>
-        <Button variant="outline">Cancel</Button>
-      </DrawerClose>
+      <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
     </DrawerFooter>
   </DrawerContent>
 </Drawer>`}
@@ -665,9 +615,7 @@ export default function DrawerPage() {
             <h4 className="font-medium text-foreground">Basic Usage</h4>
             <pre className="mt-2 rounded bg-muted p-2 text-xs">
               <code>{`<Drawer>
-  <DrawerTrigger asChild>
-    <Button>Open</Button>
-  </DrawerTrigger>
+  <DrawerTrigger render={<Button />}>Open</DrawerTrigger>
   <DrawerContent>
     <DrawerHeader>
       <DrawerTitle>Title</DrawerTitle>
@@ -676,9 +624,7 @@ export default function DrawerPage() {
     {/* Content here */}
     <DrawerFooter>
       <Button>Action</Button>
-      <DrawerClose asChild>
-        <Button variant="outline">Cancel</Button>
-      </DrawerClose>
+      <DrawerClose render={<Button variant="outline" />}>Cancel</DrawerClose>
     </DrawerFooter>
   </DrawerContent>
 </Drawer>`}</code>
@@ -707,16 +653,16 @@ export default function DrawerPage() {
             <h4 className="font-medium text-foreground">Key Points</h4>
             <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-muted-foreground">
               <li>
-                Use <code className="rounded bg-muted px-1">asChild</code> prop on DrawerTrigger and DrawerClose
-                to wrap custom elements:
-                <code className="rounded bg-muted px-1 ml-1">{`<DrawerTrigger asChild><Button>Open</Button></DrawerTrigger>`}</code>
+                Use <code className="rounded bg-muted px-1">render</code> prop on DrawerTrigger and DrawerClose
+                to render custom elements:
+                <code className="rounded bg-muted px-1 ml-1">{`<DrawerTrigger render={<Button />}>Open</DrawerTrigger>`}</code>
               </li>
               <li>
-                Set direction with <code className="rounded bg-muted px-1">direction</code> prop on Drawer:
-                <code className="rounded bg-muted px-1 ml-1">&quot;top&quot; | &quot;right&quot; | &quot;bottom&quot; | &quot;left&quot;</code>
+                Set direction with <code className="rounded bg-muted px-1">swipeDirection</code> prop on Drawer:
+                <code className="rounded bg-muted px-1 ml-1">&quot;up&quot; | &quot;right&quot; | &quot;down&quot; | &quot;left&quot;</code>
               </li>
               <li>
-                Bottom drawer shows a drag handle indicator automatically
+                Set showSwipeHandle on Drawer to show a drag handle
               </li>
               <li>
                 Header text is centered for top/bottom directions
@@ -725,7 +671,7 @@ export default function DrawerPage() {
                 Left/right drawers have max-width of sm (24rem) on larger screens
               </li>
               <li>
-                Drawer uses <code className="rounded bg-muted px-1">vaul</code> library
+                Drawer uses the <code className="rounded bg-muted px-1">@base-ui/react</code> Drawer primitive
               </li>
             </ul>
           </div>

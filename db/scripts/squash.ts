@@ -12,8 +12,7 @@
  */
 
 import 'dotenv/config';
-import { glob } from 'glob';
-import { rm, writeFile, mkdir } from 'fs/promises';
+import { glob, rm, writeFile, mkdir } from 'fs/promises';
 import { parseArgs } from 'util';
 import { basename, dirname, join } from 'path';
 import { existsSync } from 'fs';
@@ -98,7 +97,7 @@ async function main() {
   }
 
   // Check if there are any migrations
-  const migrationFiles = await glob('./db/migrations/*.sql');
+  const migrationFiles = await Array.fromAsync(glob('./db/migrations/*.sql'));
 
   if (migrationFiles.length === 0) {
     console.log('ℹ️  No migrations found - nothing to squash');
@@ -119,7 +118,7 @@ async function main() {
     }
 
     // Get all migration files
-    const filePaths = await glob('./db/migrations/*.sql');
+    const filePaths = await Array.fromAsync(glob('./db/migrations/*.sql'));
 
     // Determine which to squash
     const toSquash = getMigrationsToSquash(filePaths, values.after);
