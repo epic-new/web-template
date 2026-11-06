@@ -1,14 +1,13 @@
 import "./vitest.env"; // MUST be first — sets DATABASE_URL=":memory:" before "@/db" is imported
 import "@testing-library/jest-dom/vitest";
-import { expand } from "dotenv-expand";
 import { config } from "dotenv";
 import { beforeAll, beforeEach, vi } from "vitest";
 
 // Load .env for non-DB vars (BETTER_AUTH_SECRET, NEXT_PUBLIC_BASE_URL, …).
 // DATABASE_URL stays ":memory:" from ./vitest.env: `.env` is loaded without
 // override, and .env.test must not define DATABASE_URL (see vitest.env.ts).
-expand(config({ path: ".env" }));
-expand(config({ path: ".env.test", override: true }));
+config({ path: ".env" });
+config({ path: ".env.test", override: true });
 
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
