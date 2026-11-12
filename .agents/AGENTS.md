@@ -30,16 +30,11 @@ remain organized as vertical slices under `app/[page]/behaviors/[name]/`.
 - Once an authentication flow includes application-specific business rules,
   authorization over records, Models, or general Integrations, it must delegate
   that behavior to one Service.
-- A Service is the former server Behavior class renamed from `.behavior.ts` to
-  `.service.ts`. Keep its behavior-named class and public `static execute` method.
 - Services own authoritative validation, authorization, business rules, and
   transaction boundaries. Authorized Services call a private
   `static authorize(actor, records)` that delegates to a pure Policy.
 - Static Models live in `shared/models`, own all Drizzle queries, and return plain
   schema-inferred records. Models never authenticate or authorize.
-- When a behavior requires a Service, the former server Behavior module is now
-  that Service module. Test it through `[name].service.test.ts`; do not create a
-  parallel `[name].behavior.test.ts`.
 
 **Server state** (lists, records, caching) is owned by **TanStack Query** (`useQuery`/`useMutation`); **Jotai is for UI state only** (dialogs, selections, filter/sort/page inputs). The initial page read and page-wide query-key factory live in `app/[page]/[page-name].query.ts`; additional or on-demand reads may use `[name].query.ts` beside their behavior. Pages prefetch the initial query and hydrate it with `HydrationBoundary`; mutations are optimistic by default. For authenticated user-owned data, every page-wide query key MUST include the actor/user identity so cached data cannot cross identities; this partitions cache data and never replaces server-side authorization.
 
@@ -173,25 +168,11 @@ and `epic prd edit <PRD-id> --content-file -`. Nothing is copied to disk.
 
 ## Workflow Skills
 
-The lifecycle skills that encode this architecture — `prd`, `interview`, `plan`,
-`execute`, `verify`, `fix`, `review`, `merge`, `design`, `prototype` and `epic` —
-are not files in this repository. Each build gets them from Epic: the release
-Epic pins, for this project's type, so a new release reaches the next build
-without anyone updating anything. The `epic` CLI loads them as a plugin
-(`epic:plan`, `epic:execute`, …), and a cloud build writes them into the
-sandbox. Nothing is installed into the repo, and `git status` stays clean.
-
-- **prd → build** is the project workflow: write a PRD, break it into issues,
-  then build each issue (plan, then execute, then verify).
-- **execute** implements an issue layer by layer — models, integrations,
-  services, actions, routes, hooks, components, then tests — loading the one
-  reference each layer needs from its own `references/`.
-- The architecture and the specification format behind them live in the `epic`
-  skill's `references/architecture/web.md` and `references/specification/`.
-
-In a session you start yourself, the `epic` skill is the one that loads, and it
-carries the architecture and specification references above; the phase skills
-are handed to a build, not installed.
+The lifecycle skills (`prd`, `plan`, `execute`, `verify`, `fix`, `review`,
+`merge`, `design`, `prototype`, `epic`) are not files in this repository: Epic
+hands them to each build, and the `epic` CLI loads them in your own sessions.
+The `epic` skill carries the architecture (`references/architecture/web.md`)
+and the specification format (`references/specification/`).
 
 ## Frontend Design
 
