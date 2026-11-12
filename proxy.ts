@@ -41,11 +41,14 @@ export const config = {
      * Every path except:
      * - /auth and /api, which are public or authenticate themselves
      * - /_next, Next's own assets
+     * - /.well-known/workflow/, where the Workflow runtime calls the app itself
+     *   to run a started workflow, without a session. Only that prefix: the
+     *   rest of /.well-known/ still needs a session.
      * - a static file, by its extension. Next serves `public/logo.png` at
      *   `/logo.png`, never under `/public`, so an image, font or download in
      *   `public/` would otherwise need a session. Named extensions only: a page
      *   whose path has a dot in it (`/users/ana.silva`) still needs a session.
      */
-    "/((?!auth|api|_next/|.*\\.(?:ico|png|jpe?g|gif|svg|webp|avif|bmp|css|js|map|txt|xml|json|webmanifest|woff2?|ttf|otf|eot|pdf|csv|zip|mp4|webm|mov|mp3|wav|ogg)$).*)",
+    "/((?!auth|api|_next/|\\.well-known/workflow/|.*\\.(?:ico|png|jpe?g|gif|svg|webp|avif|bmp|css|js|map|txt|xml|json|webmanifest|woff2?|ttf|otf|eot|pdf|csv|zip|mp4|webm|mov|mp3|wav|ogg)$).*)",
   ],
 };
