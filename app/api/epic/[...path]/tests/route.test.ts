@@ -64,7 +64,7 @@ describe("/api/epic/[...path]", () => {
 
     const response = await call("POST", "telemetry", {
       body: '{"resourceLogs":[]}',
-      headers: { "user-agent": "Mozilla/5.0 Test", cookie: "sandbox-auth.session_token=secret" },
+      headers: { "user-agent": "Mozilla/5.0 Test", cookie: "sandbox-auth.session_token=secret", "x-vercel-ip-country": "BR" },
     });
 
     expect(response.status).toBe(200);
@@ -77,6 +77,7 @@ describe("/api/epic/[...path]", () => {
     expect(forwarded!.headers["x-epic-subject"]).toMatch(/^sub_[A-Za-z0-9_-]{43}$/);
     expect(forwarded!.headers["x-epic-subject-kind"]).toBe("user");
     expect(forwarded!.headers["x-epic-user-agent"]).toBe("Mozilla/5.0 Test");
+    expect(forwarded!.headers["x-epic-country"]).toBe("BR");
     expect(JSON.stringify(forwarded!.headers)).not.toContain("user-1");
     expect(forwarded!.headers.cookie).toBeUndefined();
   });
