@@ -56,6 +56,9 @@ export async function relayToEpic(request: Request, path: string[], cookies: Coo
   const anonymous = anonymousPurposes();
   if (anonymous.length > 0) headers.set("x-epic-anonymous", anonymous.join(","));
   headers.set("x-epic-user-agent", request.headers.get("user-agent") ?? "");
+  // The country the edge placed the visitor in, never their address: Analytics' audience.
+  const country = request.headers.get("x-vercel-ip-country") ?? request.headers.get("cf-ipcountry");
+  if (country) headers.set("x-epic-country", country.slice(0, 2));
   const release = process.env.EPIC_RELEASE || process.env.VERCEL_GIT_COMMIT_SHA;
   if (release) headers.set("x-epic-release", release);
   const bypass = process.env.EPIC_VERCEL_PROTECTION_BYPASS;
