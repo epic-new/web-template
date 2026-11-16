@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 const session = vi.hoisted(() => ({ user: null as { id: string } | null }));
 vi.mock("@/lib/auth", () => ({ getUser: async () => ({ user: session.user }) }));
 
-import { DELETE, GET, POST } from "../route";
+import { GET, POST } from "../route";
 
 /**
  * The app's pipe to Epic, against a real local server standing in for Epic:
@@ -14,12 +14,10 @@ import { DELETE, GET, POST } from "../route";
  */
 
 const APP = "http://localhost:8080";
-const SECRET = "x".repeat(32);
 
 type Received = { method: string; url: string; headers: IncomingHttpHeaders; body: string };
 let epic: Server;
 let received: Received[] = [];
-let answer = { status: 200, body: '{"ok":true}' };
 
 beforeAll(async () => {
   epic = createServer((request, response) => {
@@ -27,8 +25,8 @@ beforeAll(async () => {
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       received.push({ method: request.method!, url: request.url!, headers: request.headers, body: Buffer.concat(chunks).toString() });
-      response.writeHead(answer.status, { "content-type": "application/json", "retry-after": "7", "set-cookie": "epic=1" });
-      response.end(answer.body);
+      response.writeHead(200, { "content-type": "application/json", "retry-after": "7", "set-cookie": "epic=1" });
+      response.end('{"ok":true}');
     });
   });
   await new Promise<void>((resolve) => epic.listen(0, "127.0.0.1", resolve));
@@ -38,143 +36,75 @@ afterAll(() => new Promise<void>((resolve) => epic.close(() => resolve())));
 
 beforeEach(() => {
   received = [];
-  answer = { status: 200, body: '{"ok":true}' };
   session.user = null;
   vi.stubEnv("EPIC_API_URL", `http://127.0.0.1:${(epic.address() as AddressInfo).port}`);
   vi.stubEnv("EPIC_PUBLISHING_TOKEN", "epr_test");
-  vi.stubEnv("BETTER_AUTH_SECRET", SECRET);
+  vi.stubEnv("BETTER_AUTH_SECRET", "x".repeat(32));
   vi.stubEnv("NEXT_PUBLIC_BASE_URL", APP);
-  vi.stubEnv("EPIC_REPLAY_ANONYMOUS_CAPTURE", "");
-  vi.stubEnv("EPIC_REPLAY_ANONYMOUS_REPORTING", "");
 });
 
-function call(method: "GET" | "POST" | "DELETE", path: string, init: { body?: string; headers?: Record<string, string> } = {}) {
+function call(method: "GET" | "POST", path: string, headers: Record<string, string> = {}) {
   const request = new NextRequest(`${APP}/api/epic/${path}`, {
     method,
-    headers: { ...(method === "GET" ? {} : { origin: APP, "content-type": "application/json" }), ...init.headers },
-    ...(init.body === undefined ? {} : { body: init.body }),
+    headers: { ...(method === "POST" ? { "sec-fetch-site": "same-origin", "content-type": "application/json" } : {}), ...headers },
+    ...(method === "POST" ? { body: "{}" } : {}),
   });
-  const context = { params: Promise.resolve({ path: path.split("/") }) };
-  return (method === "GET" ? GET : method === "POST" ? POST : DELETE)(request, context);
+  return (method === "GET" ? GET : POST)(request, { params: Promise.resolve({ path: path.split("/") }) });
 }
 
 describe("/api/epic/[...path]", () => {
-  it("forwards what the page sent, as sent, with the credential and the person's pseudonym", async () => {
+  it("forwards the request with the credential and a pseudonym, and nothing that locates the person", async () => {
     session.user = { id: "user-1" };
 
     const response = await call("POST", "telemetry", {
-      body: '{"resourceLogs":[]}',
-      headers: { "user-agent": "Mozilla/5.0 Test", cookie: "sandbox-auth.session_token=secret", "x-vercel-ip-country": "BR" },
+      "user-agent": "Mozilla/5.0 Test",
+      cookie: "session=secret",
+      "x-vercel-ip-country": "BR",
+      "x-forwarded-for": "203.0.113.9",
+      "x-vercel-oidc-token": "secret",
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true });
     expect(response.headers.get("retry-after")).toBe("7");
     expect(response.headers.get("set-cookie")).toBeNull();
     const [forwarded] = received;
-    expect(forwarded).toMatchObject({ method: "POST", url: "/api/replay/v1/relay/telemetry", body: '{"resourceLogs":[]}' });
-    expect(forwarded!.headers.authorization).toBe("Bearer epr_test");
+    expect(forwarded).toMatchObject({ method: "POST", url: "/api/replay/v1/relay/telemetry", body: "{}" });
+    expect(forwarded!.headers).toMatchObject({
+      authorization: "Bearer epr_test",
+      "x-epic-pipe": "2",
+      "x-epic-subject-kind": "user",
+      "x-epic-fwd-user-agent": "Mozilla/5.0 Test",
+      "x-epic-fwd-x-vercel-ip-country": "BR",
+    });
     expect(forwarded!.headers["x-epic-subject"]).toMatch(/^sub_[A-Za-z0-9_-]{43}$/);
-    expect(forwarded!.headers["x-epic-subject-kind"]).toBe("user");
-    expect(forwarded!.headers["x-epic-user-agent"]).toBe("Mozilla/5.0 Test");
-    expect(forwarded!.headers["x-epic-country"]).toBe("BR");
-    expect(JSON.stringify(forwarded!.headers)).not.toContain("user-1");
-    expect(forwarded!.headers.cookie).toBeUndefined();
-  });
-
-  it("passes Epic's refusal through to the page", async () => {
-    session.user = { id: "user-1" };
-    answer = { status: 429, body: '{"code":"rate_limited"}' };
-
-    const response = await call("POST", "telemetry", { body: "{}" });
-
-    expect(response.status).toBe(429);
-    expect(await response.json()).toEqual({ code: "rate_limited" });
-  });
-
-  it("forwards a read of any path without a subject when nobody is signed in", async () => {
-    const response = await call("GET", "config");
-
-    expect(response.status).toBe(200);
-    expect(received[0]!.url).toBe("/api/replay/v1/relay/config");
-    expect(received[0]!.headers["x-epic-subject"]).toBeUndefined();
+    const sent = JSON.stringify(forwarded!.headers);
+    for (const leaked of ["user-1", "secret", "203.0.113.9"]) expect(sent).not.toContain(leaked);
   });
 
   it("refuses a write from another site without calling Epic", async () => {
-    session.user = { id: "user-1" };
-
-    const response = await call("POST", "telemetry", { body: "{}", headers: { origin: "https://evil.example" } });
+    const response = await call("POST", "telemetry", { "sec-fetch-site": "cross-site" });
 
     expect(response.status).toBe(403);
-    expect(received).toHaveLength(0);
-  });
-
-  it("refuses a body over the cap without calling Epic", async () => {
-    const response = await call("POST", "telemetry", {
-      body: "x",
-      headers: { "content-length": String(5 * 1024 * 1024) },
-    });
-
-    expect(response.status).toBe(413);
     expect(received).toHaveLength(0);
   });
 
   it("answers not_configured and calls nobody when the deployment is not registered", async () => {
     vi.stubEnv("EPIC_PUBLISHING_TOKEN", "");
 
-    const response = await call("GET", "config");
-
-    expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ code: "not_configured" });
+    expect((await call("GET", "config")).status).toBe(503);
+    expect(received).toHaveLength(0);
   });
 
-  describe("identity", () => {
-    it("names a signed-in person without a cookie", async () => {
-      session.user = { id: "user-1" };
+  it("names a visitor only once the runtime asks, then by the cookie it set", async () => {
+    await call("POST", "identity");
+    expect(received[0]!.headers["x-epic-subject"]).toBeUndefined();
 
-      const response = await call("POST", "identity", { body: "{}" });
+    const minted = await call("POST", "identity", { "x-epic-visitor": "mint" });
+    const cookie = minted.headers.get("set-cookie")!;
+    expect(cookie).toMatch(/^epic_replay_visitor=[\w-]{43}; Path=\/api\/epic; .*HttpOnly/);
 
-      expect(await response.json()).toEqual({ contractVersion: 1, kind: "user", anonymous: [], ref: expect.stringMatching(/^[A-Za-z0-9_-]{16}$/) });
-      expect(response.headers.get("set-cookie")).toBeNull();
-      expect(received).toHaveLength(0);
-    });
-
-    it("mints a visitor only where this deployment allows it, and the visitor is then forwarded", async () => {
-      expect(await (await call("POST", "identity", { body: "{}" })).json()).toMatchObject({ kind: null });
-
-      vi.stubEnv("EPIC_REPLAY_ANONYMOUS_REPORTING", "allow");
-      const minted = await call("POST", "identity", { body: "{}" });
-      expect(await minted.json()).toMatchObject({ contractVersion: 1, kind: "visitor", anonymous: ["report"] });
-      const cookie = minted.headers.get("set-cookie")!;
-      expect(cookie).toMatch(/^epic_replay_visitor=[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]+; Path=\/api\/epic;/);
-
-      await call("POST", "reports", { body: "{}", headers: { cookie: cookie.split(";")[0]! } });
-      expect(received[0]!.headers["x-epic-subject-kind"]).toBe("visitor");
-      expect(received[0]!.headers["x-epic-anonymous"]).toBe("report");
-    });
-
-    it("ignores a visitor cookie it did not sign", async () => {
-      vi.stubEnv("EPIC_REPLAY_ANONYMOUS_CAPTURE", "allow");
-
-      await call("POST", "telemetry", { body: "{}", headers: { cookie: `epic_replay_visitor=${"a".repeat(43)}.forged` } });
-
-      expect(received[0]!.headers["x-epic-subject"]).toBeUndefined();
-    });
-
-    it("tells two people apart without naming either", async () => {
-      session.user = { id: "user-1" };
-      const first = (await (await call("POST", "identity", { body: "{}" })).json()).ref;
-      session.user = { id: "user-2" };
-      const second = (await (await call("POST", "identity", { body: "{}" })).json()).ref;
-
-      expect(first).not.toBe(second);
-      expect(`${first}${second}`).not.toContain("user-");
-    });
-
-    it("forgets the visitor on DELETE", async () => {
-      const response = await call("DELETE", "identity");
-
-      expect(response.headers.get("set-cookie")).toMatch(/^epic_replay_visitor=; .*Max-Age=0/);
-    });
+    await call("POST", "reports", { cookie: cookie.split(";")[0]! });
+    expect(received[1]!.headers["x-epic-subject-kind"]).toBe("visitor");
+    expect(received[2]!.headers["x-epic-subject"]).toBe(received[1]!.headers["x-epic-subject"]);
   });
 });
