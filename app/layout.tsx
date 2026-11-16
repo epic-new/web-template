@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import Script from "next/script";
+import { EpicScript } from "@epicnew/analytics/next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Providers } from "@/components/providers";
 import { Toaster } from "@/components/ui/sonner";
@@ -51,7 +51,7 @@ export default function RootLayout({
           <PreviewBridge />
           {/* Session replay, its consent prompt and the bug-report button,
               served by Epic through this app's own pipe (app/api/epic). */}
-          {process.env.EPIC_PUBLISHING_TOKEN && <Script src="/api/epic/runtime.js" strategy="afterInteractive" />}
+          <EpicScript />
           {/* Pulls the annotation toolbar from the workspace that framed this
               preview. Unlike the bridge above, this one is safe to delete: the
               app works without it, and the toolbar it loads is served by
