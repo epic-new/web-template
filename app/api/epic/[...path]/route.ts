@@ -10,7 +10,7 @@ import { getUser } from "@/lib/auth";
  * `instrumentation.ts` and the script tag in the root layout. Epic's runtime
  * in the page calls `/api/epic/<path>`; this forwards the request to Epic with
  * the app's publishing token and a pseudonym of the person, and hands back
- * Epic's answer. It knows no endpoint, header or policy of Epic's, so nothing
+ * Epic's answer. It knows no endpoint or policy of Epic's, so nothing
  * Epic adds or changes needs an edit here.
  *
  * Epic never learns who the person is: it sees `sub_` and an HMAC of their id
@@ -35,8 +35,10 @@ const VISITOR_COOKIE = "epic_replay_visitor";
 const WITHHELD =
   /^(cookie|authorization|proxy-|host$|connection$|keep-alive$|te$|trailer$|transfer-encoding$|upgrade$|content-length$|forwarded$|via$|true-client-ip$|x-|cf-|cdn-|cloudfront-|fastly-|akamai-|fly-)/;
 const COUNTRY = new Set(["x-vercel-ip-country", "cf-ipcountry", "cloudfront-viewer-country"]);
-// `fetch` has already decoded the body, so its encoding and length no longer apply.
-const NOT_RELAYED = new Set(["set-cookie", "content-encoding", "content-length", "transfer-encoding", "connection"]);
+// Epic's answer keeps what describes the body and its caching, and anything
+// Epic names `x-epic-…`; Epic's own CORS, security and cookie headers never
+// become the app's.
+const RELAYED = /^(content-type|cache-control|etag|last-modified|retry-after|x-epic-.*)$/;
 
 type Params = { params: Promise<{ path: string[] }> };
 
@@ -88,7 +90,7 @@ async function handle(request: NextRequest, { params }: Params): Promise<Respons
 
   const relayed = new Headers({ "cache-control": "no-store" });
   response.headers.forEach((value, name) => {
-    if (!NOT_RELAYED.has(name)) relayed.set(name, value);
+    if (RELAYED.test(name)) relayed.set(name, value);
   });
   if (minted && visitorId) relayed.set("set-cookie", visitorCookie(visitorId));
   return new Response(response.body, { status: response.status, headers: relayed });
