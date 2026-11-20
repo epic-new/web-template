@@ -9,8 +9,9 @@ export const { GET, POST } = createEpicRoute({
   secret: process.env.EPIC_SECRET || process.env.EPIC_REPLAY_SECRET || process.env.BETTER_AUTH_SECRET,
   // Only an Epic behind Vercel Deployment Protection (staging) asks for it.
   upstreamHeaders: bypass ? { "x-vercel-protection-bypass": bypass } : undefined,
-  async currentUserId() {
+  // Analytics shows the project's managers who each person is; their id still never leaves the app.
+  async currentUser() {
     const { user } = await getUser();
-    return user?.id;
+    return user && { id: user.id, name: user.name, email: user.email };
   },
 });
