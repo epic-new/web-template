@@ -1,7 +1,6 @@
 'use client';
 
 import { QueryClientProvider } from '@tanstack/react-query';
-import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { Provider } from 'jotai';
 import { ThemeProvider } from 'next-themes';
 import { getQueryClient } from '@/lib/get-query-client';
@@ -19,8 +18,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
       >
         <Provider>{children}</Provider>
       </ThemeProvider>
-      {/* Bottom-right belongs to the Epic runtime's report button. */}
-      <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
     </QueryClientProvider>
   );
 }
